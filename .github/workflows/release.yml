@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest   # Linux: sin problema de symlinks de winCodeSign
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -20,7 +22,7 @@ jobs:
           cache: 'npm'
 
       - name: Instalar dependencias
-        run: npm ci
+        run: npm install
 
       - name: Descargar SumatraPDF portable
         run: |
