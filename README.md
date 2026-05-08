@@ -74,3 +74,4 @@ PC  ──USB──►  Impresora térmica  ──RJ11/RJ12──►  Cajón reg
 
 El agente envía el comando ESC/POS a la impresora, que a su vez envía el pulso eléctrico al cajón.
 Si la impresora no está encendida, el cajón no se abrirá aunque el agente esté activo.
+# factufast-print-agent
