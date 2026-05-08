@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>PrintAgent — Configuración</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      background: #f5f5f5;
+      color: #333;
+      padding: 20px;
+    }
+    h1 { font-size: 16px; font-weight: 700; margin-bottom: 16px; color: #1a1a2e; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; margin-top: 12px; color: #444; }
+    input, select {
+      width: 100%;
+      border: 1.5px solid #ddd;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+      background: #fff;
+    }
+    input:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    .hint { font-size: 11px; color: #888; margin-top: 3px; }
+    .footer { margin-top: 20px; display: flex; gap: 10px; }
+    button {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    #btnSave  { background: #6366f1; color: #fff; }
+    #btnSave:hover { background: #4f46e5; }
+    #btnTest  { background: #10b981; color: #fff; }
+    #btnTest:hover { background: #059669; }
+    #status { margin-top: 12px; padding: 8px 12px; border-radius: 8px; font-size: 12px; display: none; }
+    #status.ok    { background: #d1fae5; color: #065f46; display: block; }
+    #status.error { background: #fee2e2; color: #991b1b; display: block; }
+    .section { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid #e5e7eb; }
+    .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h1>FactuFAST PrintAgent</h1>
+
+  <div class="section">
+    <div class="section-title">Impresora térmica</div>
+    <label>Nombre de impresora (Windows)</label>
+    <input id="printerName" type="text" placeholder="Ej: EPSON TM-T20" />
+    <p class="hint">Panel de Control → Dispositivos e impresoras → nombre exacto</p>
+
+    <label>Interfaz de conexión</label>
+    <select id="printerInterface">
+      <option value="usb">USB (recomendado)</option>
+      <option value="serial">Puerto Serie (COM)</option>
+      <option value="network">Red / Ethernet</option>
+    </select>
+
+    <div id="serialGroup">
+      <label>Puerto Serie</label>
+      <input id="serialPort" type="text" placeholder="Ej: COM3" />
+    </div>
+
+    <div id="networkGroup" style="display:none">
+      <label>IP de la impresora</label>
+      <input id="networkHost" type="text" placeholder="192.168.1.100" />
+      <label>Puerto</label>
+      <input id="networkPort" type="number" value="9100" />
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Servidor FactuFAST</div>
+    <label>URL del servidor</label>
+    <input id="serverUrl" type="text" placeholder="http://localhost:3000" />
+    <p class="hint">Si FactuFAST está en otra PC de la red, usa su IP. Ej: http://192.168.1.50:3000</p>
+
+    <label>Puerto del agente</label>
+    <input id="agentPort" type="number" value="7979" />
+    <p class="hint">Puerto donde este agente escucha (dejar en 7979 salvo conflicto)</p>
+  </div>
+
+  <div class="footer">
+    <button id="btnTest">Probar impresora</button>
+    <button id="btnSave">Guardar y reiniciar</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    // Mostrar / ocultar grupos según interfaz
+    const ifaceSelect = document.getElementById('printerInterface');
+    ifaceSelect.addEventListener('change', () => {
+      document.getElementById('serialGroup').style.display =
+        ifaceSelect.value === 'serial' ? '' : 'none';
+      document.getElementById('networkGroup').style.display =
+        ifaceSelect.value === 'network' ? '' : 'none';
+    });
+
+    // Cargar config actual
+    ipcRenderer.invoke('get-config').then(cfg => {
+      document.getElementById('printerName').value    = cfg.printerName    || '';
+      document.getElementById('printerInterface').value = cfg.printerInterface || 'usb';
+      document.getElementById('serialPort').value     = cfg.serialPort     || 'COM1';
+      document.getElementById('networkHost').value    = cfg.networkHost    || '';
+      document.getElementById('networkPort').value    = cfg.networkPort    || 9100;
+      document.getElementById('serverUrl').value      = cfg.serverUrl      || 'http://localhost:3000';
+      document.getElementById('agentPort').value      = cfg.agentPort      || 7979;
+      ifaceSelect.dispatchEvent(new Event('change'));
+    });
+
+    document.getElementById('btnSave').addEventListener('click', async () => {
+      const cfg = {
+        printerName:       document.getElementById('printerName').value.trim(),
+        printerInterface:  document.getElementById('printerInterface').value,
+        serialPort:        document.getElementById('serialPort').value.trim(),
+        networkHost:       document.getElementById('networkHost').value.trim(),
+        networkPort:       parseInt(document.getElementById('networkPort').value) || 9100,
+        serverUrl:         document.getElementById('serverUrl').value.trim().replace(/\/$/, ''),
+        agentPort:         parseInt(document.getElementById('agentPort').value) || 7979,
+      };
+      await ipcRenderer.invoke('save-config', cfg);
+      showStatus('Configuración guardada. Reinicia el agente para aplicar cambios.', 'ok');
+    });
+
+    document.getElementById('btnTest').addEventListener('click', async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:7979/print', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ abrirCajon: true, imprimirTicket: false }),
+        });
+        const data = await res.json();
+        if (data.ok) showStatus('¡Cajón abierto correctamente!', 'ok');
+        else showStatus('Respuesta con error: ' + JSON.stringify(data.errors), 'error');
+      } catch (e) {
+        showStatus('No se pudo conectar al agente: ' + e.message, 'error');
+      }
+    });
+
+    function showStatus(msg, type) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = type;
+    }
+  </script>
+</body>
+</html>

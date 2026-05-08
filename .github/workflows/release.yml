@@ -1,0 +1,59 @@
+name: Build & Release PrintAgent
+
+on:
+  push:
+    tags:
+      - 'v*'   # Dispara con: git tag v1.0.0 && git push --tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # Linux: sin problema de symlinks de winCodeSign
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Descargar SumatraPDF portable
+        run: |
+          mkdir -p vendor
+          curl -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" \
+               -o vendor/SumatraPDF.exe
+
+      - name: Compilar TypeScript
+        run: npm run build
+
+      - name: Build instalador Windows (.exe NSIS)
+        run: npx electron-builder --win nsis --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build AppImage Linux
+        run: npx electron-builder --linux AppImage --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar en GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "FactuFAST PrintAgent ${{ github.ref_name }}"
+          body: |
+            ## Instalación rápida
+
+            **Windows:** Descarga el `.exe` → siguiente → instalar → listo.
+            **Linux:** Descarga el `.AppImage` → `chmod +x` → ejecutar.
+
+            Después: clic derecho en el ícono de la bandeja → **Configuración** → ingresar nombre exacto de la impresora.
+          files: |
+            release/*.exe
+            release/*.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

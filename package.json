@@ -1,0 +1,65 @@
+{
+  "name": "factufast-print-agent",
+  "version": "1.0.0",
+  "description": "PrintAgent local para FactuFAST — controla impresora térmica y cajón registrador",
+  "main": "dist/main.js",
+  "author": "FactuFAST",
+  "scripts": {
+    "dev": "tsc && electron dist/main.js",
+    "build": "tsc",
+    "dist:win": "npm run build && electron-packager . \"FactuFAST PrintAgent\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=release --ignore=vendor --extra-resource=vendor/SumatraPDF.exe --icon=assets/icon.ico",
+    "dist:linux": "npm run build && electron-packager . \"FactuFAST PrintAgent\" --platform=linux --arch=x64 --out=release --overwrite --ignore=release --ignore=vendor --extra-resource=vendor/SumatraPDF.exe",
+    "dist:all": "npm run dist:win && npm run dist:linux",
+    "dist:installer": "npm run build && electron-builder --win nsis --linux AppImage --publish never"
+  },
+  "dependencies": {
+    "@serialport/bindings-cpp": "^12.0.1",
+    "express": "^4.18.2",
+    "node-thermal-printer": "^4.4.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-packager": "^17.1.2",
+    "typescript": "^5.3.2"
+  },
+  "build": {
+    "appId": "com.factufast.print-agent",
+    "productName": "FactuFAST PrintAgent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/.bin"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/SumatraPDF.exe",
+        "to": "SumatraPDF.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FactuFAST PrintAgent"
+    }
+  }
+}
