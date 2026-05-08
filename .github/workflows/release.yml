@@ -3,14 +3,14 @@ name: Build & Release PrintAgent
 on:
   push:
     tags:
-      - 'v*'   # Dispara con: git tag v1.0.0 && git push --tags
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest   # Linux: sin problema de symlinks de winCodeSign
-    permissions:
-      contents: write
-
+  build-windows:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +19,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Instalar dependencias
         run: npm install
@@ -27,8 +26,8 @@ jobs:
       - name: Descargar SumatraPDF portable
         run: |
           mkdir -p vendor
-          curl -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" \
-               -o vendor/SumatraPDF.exe
+          curl.exe -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" -o vendor/SumatraPDF.exe
+        shell: bash
 
       - name: Compilar TypeScript
         run: npm run build
@@ -38,10 +37,63 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Subir artefacto Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release/*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Descargar SumatraPDF portable
+        run: |
+          mkdir -p vendor
+          curl -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" -o vendor/SumatraPDF.exe
+
+      - name: Compilar TypeScript
+        run: npm run build
+
       - name: Build AppImage Linux
         run: npx electron-builder --linux AppImage --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Subir artefacto Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer
+          path: release/*.AppImage
+
+  publish-release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Descargar artefactos Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release
+          
+      - name: Descargar artefactos Linux
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-installer
+          path: release
 
       - name: Publicar en GitHub Release
         uses: softprops/action-gh-release@v2
