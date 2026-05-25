@@ -1,7 +1,8 @@
 import { app, Tray, ipcMain } from 'electron';
 import { startServer } from './server';
-import { createTray, updateTrayMenu } from './tray';
+import { createTray, updateTrayMenu, notificarError, registrarActividad } from './tray';
 import { loadConfig, saveConfig } from './config';
+import { log } from './logger';
 
 // Impedir múltiples instancias
 const gotLock = app.requestSingleInstanceLock();
@@ -15,20 +16,29 @@ app.setLoginItemSettings({ openAtLogin: true, name: 'FactuFAST PrintAgent' });
 let tray: Tray | null = null;
 
 app.on('ready', () => {
-  // No mostrar ventana principal — solo bandeja del sistema
   app.dock?.hide(); // macOS: ocultar del dock
+
+  log('INFO', 'PrintAgent iniciado');
 
   tray = createTray(() => app.quit());
 
-  startServer((connected) => {
-    if (tray) updateTrayMenu(tray, connected, () => app.quit());
+  startServer((ok, errors) => {
+    if (tray) updateTrayMenu(tray, ok, () => app.quit());
+    if (ok) {
+      registrarActividad();
+    } else if (errors && errors.length > 0) {
+      notificarError('Error de impresión', errors.join('\n'));
+    }
   });
 
   ipcMain.handle('get-config', () => loadConfig());
-  ipcMain.handle('save-config', (_event, cfg) => { saveConfig(cfg); });
+  ipcMain.handle('save-config', (_event, cfg) => {
+    saveConfig(cfg);
+    log('INFO', 'Configuración guardada');
+  });
 });
 
-// Evitar que la app se cierre al cerrar la última ventana (solo la bandeja importa)
+// Evitar que la app se cierre al cerrar la última ventana
 app.on('window-all-closed', () => {
   // noop — la app sigue viva en la bandeja
 });

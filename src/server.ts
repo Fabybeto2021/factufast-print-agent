@@ -1,14 +1,27 @@
 import express, { Request, Response } from 'express';
+import * as path from 'path';
+import * as fs from 'fs';
 import { loadConfig } from './config';
 import { abrirCajon, imprimirTicket } from './printer';
+import { log } from './logger';
 
 interface PrintRequest {
   comprobanteId?: string;
   imprimirTicket?: boolean;
   abrirCajon?: boolean;
+  authToken?: string;
 }
 
-export function startServer(onStatusChange: (ok: boolean) => void): void {
+function getVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+    return pkg.version ?? '1.0.0';
+  } catch {
+    return '1.0.0';
+  }
+}
+
+export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => void): void {
   const app = express();
   app.use(express.json());
 
@@ -24,45 +37,54 @@ export function startServer(onStatusChange: (ok: boolean) => void): void {
 
   app.get('/status', (_req: Request, res: Response) => {
     const cfg = loadConfig();
-    res.json({ ok: true, printer: cfg.printerName || '(sin configurar)', version: '1.0.0' });
+    res.json({ ok: true, printer: cfg.printerName || '(sin configurar)', version: getVersion() });
   });
 
   app.post('/print', async (req: Request, res: Response) => {
     const body = req.body as PrintRequest;
     const errores: string[] = [];
 
+    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} id:${body.comprobanteId ?? '-'}`);
+
     try {
       if (body.abrirCajon) {
         try {
           await abrirCajon();
         } catch (e) {
-          errores.push('cajón: ' + (e instanceof Error ? e.message : String(e)));
+          const msg = 'cajón: ' + (e instanceof Error ? e.message : String(e));
+          errores.push(msg);
+          log('ERROR', msg);
         }
       }
 
       if (body.imprimirTicket && body.comprobanteId) {
         try {
-          await imprimirTicket(body.comprobanteId);
+          await imprimirTicket(body.comprobanteId, body.authToken);
         } catch (e) {
-          errores.push('impresión: ' + (e instanceof Error ? e.message : String(e)));
+          const msg = 'impresión: ' + (e instanceof Error ? e.message : String(e));
+          errores.push(msg);
+          log('ERROR', msg);
         }
       }
 
       if (errores.length > 0) {
+        onStatusChange(false, errores);
         res.status(207).json({ ok: false, errors: errores });
       } else {
         onStatusChange(true);
         res.json({ ok: true });
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('ERROR', `Error inesperado en /print: ${msg}`);
       onStatusChange(false);
-      res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      res.status(500).json({ ok: false, error: msg });
     }
   });
 
   const cfg = loadConfig();
   const port = cfg.agentPort ?? 7979;
   app.listen(port, '127.0.0.1', () => {
-    console.log(`PrintAgent escuchando en http://127.0.0.1:${port}`);
+    log('INFO', `PrintAgent v${getVersion()} escuchando en http://127.0.0.1:${port}`);
   });
 }

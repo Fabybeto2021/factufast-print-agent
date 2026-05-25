@@ -10,6 +10,7 @@ export interface AgentConfig {
   networkPort: number;
   serverUrl: string;
   agentPort: number;
+  notificaciones: boolean;
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -20,6 +21,7 @@ const DEFAULT_CONFIG: AgentConfig = {
   networkPort: 9100,
   serverUrl: 'http://localhost:3000',
   agentPort: 7979,
+  notificaciones: true,
 };
 
 function configPath(): string {
