@@ -25,11 +25,17 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
   const app = express();
   app.use(express.json());
 
-  // CORS: solo localhost puede llamar al agente
-  app.use((_req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // CORS: solo permite peticiones desde el servidor FactuFAST configurado
+  app.use((req, res, next) => {
+    const cfg = loadConfig();
+    const origin = req.headers.origin ?? '';
+    // Permitir solo el origen del servidor configurado (y peticiones sin origin como Electron/curl)
+    const allowedOrigin = cfg.serverUrl || 'http://localhost:3000';
+    if (!origin || origin === allowedOrigin || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+      res.setHeader('Access-Control-Allow-Origin', origin || allowedOrigin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    }
     next();
   });
 
