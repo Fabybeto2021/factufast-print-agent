@@ -32,16 +32,11 @@ jobs:
       - name: Compilar TypeScript
         run: npm run build
 
-      - name: Build instalador Windows (.exe NSIS)
-        run: npx electron-builder --win nsis --publish never
+      # --publish always: sube .exe + latest.yml al GitHub Release (necesario para electron-updater)
+      - name: Build y publicar instalador Windows
+        run: npx electron-builder --win nsis --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Subir artefacto Windows
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: release/*.exe
 
   build-linux:
     runs-on: ubuntu-latest
@@ -65,49 +60,7 @@ jobs:
       - name: Compilar TypeScript
         run: npm run build
 
-      - name: Build AppImage Linux
-        run: npx electron-builder --linux AppImage --publish never
+      - name: Build y publicar AppImage Linux
+        run: npx electron-builder --linux AppImage --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Subir artefacto Linux
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-installer
-          path: release/*.AppImage
-
-  publish-release:
-    needs: [build-windows, build-linux]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        
-      - name: Descargar artefactos Windows
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: release
-          
-      - name: Descargar artefactos Linux
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-installer
-          path: release
-
-      - name: Publicar en GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "FactuFAST PrintAgent ${{ github.ref_name }}"
-          body: |
-            ## Instalación rápida
-
-            **Windows:** Descarga el `.exe` → siguiente → instalar → listo.
-            **Linux:** Descarga el `.AppImage` → `chmod +x` → ejecutar.
-
-            Después: clic derecho en el ícono de la bandeja → **Configuración** → ingresar nombre exacto de la impresora.
-          files: |
-            release/*.exe
-            release/*.AppImage
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

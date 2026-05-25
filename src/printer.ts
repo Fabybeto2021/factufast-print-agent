@@ -7,8 +7,9 @@ import { execFile } from 'child_process';
 import { loadConfig } from './config';
 import { log } from './logger';
 
-// Comando ESC/POS estándar para abrir cajón (pin 2)
-const ESC_POS_OPEN_DRAWER = Buffer.from([0x1b, 0x70, 0x00, 0x19, 0xfa]);
+// Comandos ESC/POS para abrir cajón — pin 2 y pin 5 (depende del modelo de cajón)
+const ESC_POS_DRAWER_PIN2 = Buffer.from([0x1b, 0x70, 0x00, 0x3c, 0x3c]);
+const ESC_POS_DRAWER_PIN5 = Buffer.from([0x1b, 0x70, 0x01, 0x3c, 0x3c]);
 
 function getSumatraPath(): string {
   const resourcesPath = process.resourcesPath ?? path.join(__dirname, '..', 'vendor');
@@ -27,6 +28,12 @@ export async function abrirCajon(): Promise<void> {
   const cfg = loadConfig();
   log('INFO', `Abriendo cajón — interfaz: ${cfg.printerInterface}, impresora: "${cfg.printerName}"`);
 
+  if (!cfg.printerName) {
+    const msg = 'Nombre de impresora no configurado';
+    log('ERROR', msg);
+    throw new Error(msg);
+  }
+
   // Determinar interfaz correcta según tipo de conexión
   let iface: string;
   if (cfg.printerInterface === 'serial') {
@@ -38,6 +45,7 @@ export async function abrirCajon(): Promise<void> {
     iface = `printer:${cfg.printerName}`;
   }
 
+  // Intentar con node-thermal-printer enviando pin 2 y pin 5 (cubre ambos modelos de cajón)
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { ThermalPrinter, PrinterTypes, CharacterSet, BreakLine } = require('node-thermal-printer');
@@ -50,44 +58,89 @@ export async function abrirCajon(): Promise<void> {
     });
 
     await printer.isPrinterConnected();
-    printer.raw(ESC_POS_OPEN_DRAWER);
+    // Enviar pin 2 y pin 5 — cubre ambos modelos de cajón sin configuración adicional
+    printer.raw(ESC_POS_DRAWER_PIN2);
+    printer.raw(ESC_POS_DRAWER_PIN5);
     await printer.execute();
     await printer.clear();
-    log('INFO', 'Cajón abierto OK (node-thermal-printer)');
+    log('INFO', 'Cajón: comando enviado OK (node-thermal-printer, pin2+pin5)');
     return;
   } catch (err) {
     log('WARN', `node-thermal-printer falló (${(err as Error).message}), intentando fallback Windows`);
   }
 
-  // Fallback: copiar bytes ESC/POS directamente al spooler de Windows
-  if (os.platform() === 'win32' && cfg.printerName) {
+  // Fallback: enviar bytes ESC/POS directamente al spooler de Windows (pin 2 + pin 5)
+  if (os.platform() === 'win32') {
     try {
-      await imprimirRawWindows(ESC_POS_OPEN_DRAWER, cfg.printerName);
-      log('INFO', 'Cajón abierto OK (fallback Windows spooler)');
+      const combined = Buffer.concat([ESC_POS_DRAWER_PIN2, ESC_POS_DRAWER_PIN5]);
+      await imprimirRawWindows(combined, cfg.printerName);
+      log('INFO', 'Cajón: comando enviado OK (fallback Windows spooler, pin2+pin5)');
     } catch (err) {
       const msg = `Fallback spooler falló: ${(err as Error).message}`;
       log('ERROR', msg);
       throw new Error(msg);
     }
   } else {
-    const msg = 'No se pudo abrir el cajón: impresora no configurada o SO no soportado';
+    const msg = 'No se pudo abrir el cajón: SO no soportado';
     log('ERROR', msg);
     throw new Error(msg);
   }
 }
 
 /**
- * Envía bytes raw al spooler de Windows usando COPY /B.
+ * Envía bytes raw al spooler de Windows usando la Win32 API vía PowerShell.
+ * No requiere que la impresora esté compartida en red.
  */
 function imprimirRawWindows(data: Buffer, printerName: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const tmpFile = path.join(os.tmpdir(), `cajon_${Date.now()}.bin`);
-    fs.writeFileSync(tmpFile, data);
-    const args = ['/c', `copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`];
-    execFile('cmd.exe', args, (err) => {
-      try { fs.unlinkSync(tmpFile); } catch { /* noop */ }
-      if (err) reject(err); else resolve();
-    });
+    const hex = Array.from(data).map(b => `0x${b.toString(16).padStart(2, '0')}`).join(',');
+    // Usa System.Drawing.Printing con RAW datatype para llegar al hardware sin pasar por GDI
+    const ps = `
+$bytes = [byte[]]@(${hex})
+$pj = New-Object System.Drawing.Printing.PrintDocument
+$pj.PrinterSettings.PrinterName = '${printerName.replace(/'/g, "''")}'
+Add-Type -AssemblyName System.Drawing
+$stream = New-Object System.IO.MemoryStream(,$bytes)
+$raw = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+[System.Runtime.InteropServices.Marshal]::Copy($bytes,0,$raw,$bytes.Length)
+$hPrinter = [IntPtr]::Zero
+$di = New-Object PSObject -Property @{pDocName='CajonESCPOS';pDataType='RAW';pOutputFile=$null;fType=0}
+Add-Type -TypeDefinition @'
+using System;using System.Runtime.InteropServices;
+public struct DOC_INFO_1{public string pDocName;public string pOutputFile;public string pDataType;}
+public class WinSpool{
+  [DllImport("winspool.drv",CharSet=CharSet.Auto)]public static extern bool OpenPrinter(string n,out IntPtr h,IntPtr d);
+  [DllImport("winspool.drv")]public static extern bool ClosePrinter(IntPtr h);
+  [DllImport("winspool.drv",CharSet=CharSet.Auto)]public static extern int StartDocPrinter(IntPtr h,int l,ref DOC_INFO_1 di);
+  [DllImport("winspool.drv")]public static extern bool StartPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]public static extern bool WritePrinter(IntPtr h,IntPtr b,int n,out int w);
+  [DllImport("winspool.drv")]public static extern bool EndPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]public static extern bool EndDocPrinter(IntPtr h);}
+'@
+$h=[IntPtr]::Zero
+if([WinSpool]::OpenPrinter('${printerName.replace(/'/g, "''")}', [ref]$h, [IntPtr]::Zero)){
+  $di2=New-Object DOC_INFO_1;$di2.pDocName='CajonCmd';$di2.pDataType='RAW';$di2.pOutputFile=$null
+  [WinSpool]::StartDocPrinter($h,1,[ref]$di2)|Out-Null
+  [WinSpool]::StartPagePrinter($h)|Out-Null
+  $buf=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+  [System.Runtime.InteropServices.Marshal]::Copy($bytes,0,$buf,$bytes.Length)
+  $written=0;[WinSpool]::WritePrinter($h,$buf,$bytes.Length,[ref]$written)|Out-Null
+  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
+  [WinSpool]::EndPagePrinter($h)|Out-Null;[WinSpool]::EndDocPrinter($h)|Out-Null;[WinSpool]::ClosePrinter($h)|Out-Null
+  exit 0
+} else { exit 1 }
+`.trim();
+
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { timeout: 8000 },
+      (err, _stdout, stderr) => {
+        if (err || stderr?.trim()) {
+          reject(new Error(stderr?.trim() || err?.message || 'PowerShell falló'));
+        } else {
+          resolve();
+        }
+      }
+    );
   });
 }
 

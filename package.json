@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@serialport/bindings-cpp": "^12.0.1",
+    "electron-updater": "^6.3.9",
     "express": "^4.18.2",
     "node-thermal-printer": "^4.4.1"
   },
@@ -60,6 +61,11 @@
       "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
       "shortcutName": "FactuFAST PrintAgent"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Fabybeto2021",
+      "repo": "factufast-print-agent"
     }
   }
 }
