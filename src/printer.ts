@@ -145,10 +145,33 @@ if([WinSpool]::OpenPrinter('${printerName.replace(/'/g, "''")}', [ref]$h, [IntPt
 }
 
 /**
- * Descarga el PDF del ticket desde el servidor FactuFAST e imprime con SumatraPDF.
- * Reintenta la descarga hasta 3 veces ante errores de red.
+ * Descarga el RIDE fiscal (80mm) e imprime con SumatraPDF.
  */
 export async function imprimirTicket(comprobanteId: string, authToken?: string): Promise<void> {
+  await imprimirPdf(comprobanteId, 'ticket', 'ticket', authToken);
+}
+
+/**
+ * Descarga e imprime los boletos de sorteo de ánfora (independiente del ticket fiscal).
+ * El servidor devuelve 204 cuando no hay boletos pendientes (digital / ya impresos):
+ * en ese caso no se imprime nada y no es un error.
+ */
+export async function imprimirCupones(comprobanteId: string, authToken?: string): Promise<void> {
+  await imprimirPdf(comprobanteId, 'cupones', 'cupones', authToken);
+}
+
+/**
+ * Descarga un PDF del servidor FactuFAST e imprime con SumatraPDF.
+ * Reintenta la descarga hasta 3 veces ante errores de red.
+ * pathSuffix → segmento final de /api/comprobantes/{id}/pdf/{pathSuffix}.
+ * Si el servidor responde 204 (sin contenido) se omite la impresión silenciosamente.
+ */
+async function imprimirPdf(
+  comprobanteId: string,
+  pathSuffix: string,
+  label: string,
+  authToken?: string,
+): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.printerName) throw new Error('Nombre de impresora no configurado');
 
@@ -157,29 +180,35 @@ export async function imprimirTicket(comprobanteId: string, authToken?: string):
     throw new Error('SumatraPDF.exe no encontrado en: ' + sumatraExe);
   }
 
-  const pdfUrl = `${cfg.serverUrl}/api/comprobantes/${comprobanteId}/pdf/ticket`;
-  const tmpPdf = path.join(os.tmpdir(), `ticket_${comprobanteId}_${Date.now()}.pdf`);
+  const pdfUrl = `${cfg.serverUrl}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
+  const tmpPdf = path.join(os.tmpdir(), `${label}_${comprobanteId}_${Date.now()}.pdf`);
 
-  log('INFO', `Descargando ticket ${comprobanteId} desde ${pdfUrl}`);
+  log('INFO', `Descargando ${label} ${comprobanteId} desde ${pdfUrl}`);
 
   // Retry hasta 3 intentos con 1.5s entre cada uno
   let lastError: Error | null = null;
+  let hayContenido = false;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      await descargarArchivo(pdfUrl, tmpPdf, authToken);
+      hayContenido = await descargarArchivo(pdfUrl, tmpPdf, authToken);
       lastError = null;
       break;
     } catch (err) {
       lastError = err as Error;
-      log('WARN', `Descarga intento ${attempt}/3 falló: ${lastError.message}`);
+      log('WARN', `Descarga ${label} intento ${attempt}/3 falló: ${lastError.message}`);
       if (attempt < 3) await delay(1500);
     }
   }
   if (lastError) {
-    throw new Error(`Descarga del ticket falló tras 3 intentos: ${lastError.message}`);
+    throw new Error(`Descarga de ${label} falló tras 3 intentos: ${lastError.message}`);
   }
 
-  log('INFO', `PDF descargado, enviando a impresora "${cfg.printerName}"`);
+  if (!hayContenido) {
+    log('INFO', `Sin ${label} para imprimir (204) — omitido`);
+    return;
+  }
+
+  log('INFO', `PDF ${label} descargado, enviando a impresora "${cfg.printerName}"`);
 
   await new Promise<void>((resolve, reject) => {
     execFile(
@@ -189,10 +218,10 @@ export async function imprimirTicket(comprobanteId: string, authToken?: string):
       (err) => {
         try { fs.unlinkSync(tmpPdf); } catch { /* noop */ }
         if (err) {
-          log('ERROR', `SumatraPDF falló: ${err.message}`);
+          log('ERROR', `SumatraPDF (${label}) falló: ${err.message}`);
           reject(err);
         } else {
-          log('INFO', `Ticket ${comprobanteId} impreso OK`);
+          log('INFO', `${label} ${comprobanteId} impreso OK`);
           resolve();
         }
       },
@@ -200,7 +229,8 @@ export async function imprimirTicket(comprobanteId: string, authToken?: string):
   });
 }
 
-function descargarArchivo(url: string, destPath: string, authToken?: string): Promise<void> {
+/** Resuelve true si descargó contenido (200), false si el servidor respondió 204. */
+function descargarArchivo(url: string, destPath: string, authToken?: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
     const options: https.RequestOptions = { headers: {} };
@@ -210,14 +240,23 @@ function descargarArchivo(url: string, destPath: string, authToken?: string): Pr
 
     const file = fs.createWriteStream(destPath);
     proto.get(url, options, (res) => {
-      if (res.statusCode !== 200) {
+      // 204 = sin contenido (no hay boletos pendientes) → no es error, no se imprime.
+      if (res.statusCode === 204) {
+        res.resume();
         file.close();
         try { fs.unlinkSync(destPath); } catch { /* noop */ }
-        reject(new Error(`HTTP ${res.statusCode} al descargar ticket`));
+        resolve(false);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        file.close();
+        try { fs.unlinkSync(destPath); } catch { /* noop */ }
+        reject(new Error(`HTTP ${res.statusCode} al descargar PDF`));
         return;
       }
       res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
+      file.on('finish', () => { file.close(); resolve(true); });
       file.on('error', (err) => {
         file.close();
         try { fs.unlinkSync(destPath); } catch { /* noop */ }

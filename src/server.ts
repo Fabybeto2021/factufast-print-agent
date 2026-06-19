@@ -1,13 +1,14 @@
 import express, { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
-import { loadConfig } from './config';
-import { abrirCajon, imprimirTicket } from './printer';
+import { loadConfig, AGENT_PORT } from './config';
+import { abrirCajon, imprimirTicket, imprimirCupones } from './printer';
 import { log } from './logger';
 
 interface PrintRequest {
   comprobanteId?: string;
   imprimirTicket?: boolean;
+  imprimirCupones?: boolean;
   abrirCajon?: boolean;
   authToken?: string;
 }
@@ -56,7 +57,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
     const body = req.body as PrintRequest;
     const errores: string[] = [];
 
-    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} id:${body.comprobanteId ?? '-'}`);
+    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'}`);
 
     try {
       if (body.abrirCajon) {
@@ -79,6 +80,18 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
         }
       }
 
+      // Boletos de ánfora — independiente del ticket fiscal (se imprimen aunque
+      // el cajón esté en modo ahorro de papel). 204 del servidor = nada que imprimir.
+      if (body.imprimirCupones && body.comprobanteId) {
+        try {
+          await imprimirCupones(body.comprobanteId, body.authToken);
+        } catch (e) {
+          const msg = 'cupones: ' + (e instanceof Error ? e.message : String(e));
+          errores.push(msg);
+          log('ERROR', msg);
+        }
+      }
+
       if (errores.length > 0) {
         onStatusChange(false, errores);
         res.status(207).json({ ok: false, errors: errores });
@@ -94,9 +107,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
     }
   });
 
-  const cfg = loadConfig();
-  const port = cfg.agentPort ?? 7979;
-  app.listen(port, '127.0.0.1', () => {
-    log('INFO', `PrintAgent v${getVersion()} escuchando en http://127.0.0.1:${port}`);
+  app.listen(AGENT_PORT, '127.0.0.1', () => {
+    log('INFO', `PrintAgent v${getVersion()} escuchando en http://127.0.0.1:${AGENT_PORT}`);
   });
 }
