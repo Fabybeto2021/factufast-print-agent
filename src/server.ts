@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadConfig, AGENT_PORT } from './config';
-import { abrirCajon, imprimirTicket, imprimirCupones } from './printer';
+import { abrirCajon, imprimirTicket, imprimirCupones, diagnostico, probarImpresion } from './printer';
 import { log } from './logger';
 
 interface PrintRequest {
@@ -33,24 +33,49 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
     const configuredOrigin = cfg.serverUrl || '';
 
     const isAllowed =
-      !origin ||                                         // curl / Electron / sin origin
-      origin.startsWith('http://localhost') ||           // cualquier puerto localhost
-      origin.startsWith('http://127.0.0.1') ||          // loopback explícito
-      (configuredOrigin && origin === configuredOrigin); // URL de producción configurada
+      !origin ||
+      origin.startsWith('http://localhost') ||
+      origin.startsWith('http://127.0.0.1') ||
+      (configuredOrigin && origin === configuredOrigin);
 
     if (isAllowed) {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      // Private Network Access: un sitio HTTPS público que llama a http://localhost
+      // dispara un preflight PNA. Sin esta cabecera Chrome/Edge bloquearían al agente.
+      if (req.headers['access-control-request-private-network'] === 'true') {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
     }
     next();
   });
 
   app.options('*', (_req, res) => res.sendStatus(200));
 
-  app.get('/status', (_req: Request, res: Response) => {
-    const cfg = loadConfig();
-    res.json({ ok: true, printer: cfg.printerName || '(sin configurar)', version: getVersion() });
+  // Estado con sonda REAL de hardware/servidor (ya no miente con ok:true fijo).
+  app.get('/status', async (_req: Request, res: Response) => {
+    try {
+      const diag = await diagnostico();
+      const ok = diag.printerFound && diag.sumatraOk;
+      res.json({ ok, version: getVersion(), printer: diag.printerName || '(sin configurar)', ...diag });
+    } catch (e) {
+      res.json({ ok: false, version: getVersion(), error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // Diagnóstico activo: imprime un recibo de prueba + abre el cajón.
+  app.post('/selftest', async (_req: Request, res: Response) => {
+    const errores: string[] = [];
+    try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
+    try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
+    const diag = await diagnostico().catch(() => null);
+    if (errores.length > 0) {
+      onStatusChange(false, errores);
+      return res.status(207).json({ ok: false, errors: errores, diagnostico: diag });
+    }
+    onStatusChange(true);
+    res.json({ ok: true, diagnostico: diag });
   });
 
   app.post('/print', async (req: Request, res: Response) => {

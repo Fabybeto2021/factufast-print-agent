@@ -9,9 +9,10 @@ export interface AgentConfig {
   networkHost: string;
   networkPort: number;
   serverUrl: string;
-  agentPort: number;
   notificaciones: boolean;
 }
+
+export const AGENT_PORT = 7979;
 
 const DEFAULT_CONFIG: AgentConfig = {
   printerName: '',
@@ -20,7 +21,6 @@ const DEFAULT_CONFIG: AgentConfig = {
   networkHost: '192.168.1.100',
   networkPort: 9100,
   serverUrl: 'http://localhost:3000',
-  agentPort: 7979,
   notificaciones: true,
 };
 

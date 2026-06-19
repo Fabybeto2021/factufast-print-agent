@@ -1,9 +1,19 @@
 import { app, Tray, ipcMain } from 'electron';
-import { autoUpdater } from 'electron-updater';
 import { startServer } from './server';
 import { createTray, updateTrayMenu, notificarError, notificarExito, registrarActividad } from './tray';
 import { loadConfig, saveConfig } from './config';
+import { listarImpresoras, probarImpresion, abrirCajon, diagnostico } from './printer';
 import { log } from './logger';
+
+// Robustez: nunca morir en silencio por un error no capturado — registrar y seguir
+// vivo en la bandeja (una caja no debe quedarse sin agente de impresión por un fallo
+// puntual de hardware/red).
+process.on('uncaughtException', (err) => {
+  try { log('ERROR', `uncaughtException: ${err?.message ?? err}`); } catch { /* noop */ }
+});
+process.on('unhandledRejection', (reason) => {
+  try { log('ERROR', `unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`); } catch { /* noop */ }
+});
 
 // Impedir múltiples instancias
 const gotLock = app.requestSingleInstanceLock();
@@ -37,13 +47,23 @@ app.on('ready', () => {
     saveConfig(cfg);
     log('INFO', 'Configuración guardada');
   });
+  ipcMain.handle('list-printers', () => listarImpresoras());
+  ipcMain.handle('diagnostico', () => diagnostico());
+  ipcMain.handle('selftest', async () => {
+    const errores: string[] = [];
+    try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
+    try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
+    return { ok: errores.length === 0, errors: errores };
+  });
 
   // Auto-update: revisa GitHub Releases 10 segundos después de iniciar
   setTimeout(() => configurarAutoUpdate(), 10_000);
 });
 
 function configurarAutoUpdate(): void {
-  autoUpdater.logger = null; // usamos nuestro propio logger
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { autoUpdater } = require('electron-updater') as typeof import('electron-updater');
+  autoUpdater.logger = null;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
@@ -59,31 +79,10 @@ function configurarAutoUpdate(): void {
   autoUpdater.on('update-downloaded', (info) => {
     log('INFO', `Actualización v${info.version} descargada — se instalará al cerrar`);
     notificarExito(`Actualización v${info.version} lista. Se instalará al reiniciar el agente.`);
-    // Actualizar el menú del tray con opción de instalar ahora
-    if (tray) {
-      const { Menu } = require('electron');
-      const currentMenu = tray.getContextMenu();
-      if (currentMenu) {
-        // Agregar item de actualización al inicio del menú existente
-        const updateItem = {
-          label: `⬆ Instalar actualización v${info.version}`,
-          click: () => {
-            autoUpdater.quitAndInstall(false, true);
-          },
-        };
-        const items = currentMenu.items;
-        Menu.buildFromTemplate([updateItem, { type: 'separator' as const }, ...items.map(i => ({
-          label: i.label,
-          enabled: i.enabled,
-          click: i.click ?? undefined,
-          type: i.type as 'normal' | 'separator' | 'submenu' | 'checkbox' | 'radio' | undefined,
-        }))]);
-      }
-    }
+    if (tray) updateTrayMenu(tray, true, () => app.quit(), info.version);
   });
 
   autoUpdater.on('error', (err) => {
-    // No mostrar notificación por errores de update — son silenciosos en el log
     log('WARN', `Auto-update error: ${err.message}`);
   });
 

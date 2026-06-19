@@ -7,10 +7,12 @@ haya una impresora conectada. Se comunica con el POS vía HTTP en `localhost:797
 
 | Acción | Descripción |
 |--------|-------------|
-| Abrir cajón | Envía comando ESC/POS `[1B 70 00 19 FA]` al puerto USB/COM |
+| Abrir cajón | Envía pulso ESC/POS (pin 2 + pin 5) directo a la impresora (USB→winspool, red→TCP) |
 | Imprimir ticket | Descarga el PDF del servidor FactuFAST e imprime con SumatraPDF silencioso |
+| Imprimir cupones | Boletos de ánfora (one-shot con confirmación tras imprimir) |
 | Solo cajón (sin papel) | `{ abrirCajon: true, imprimirTicket: false }` |
 | Solo papel (sin cajón) | `{ abrirCajon: false, imprimirTicket: true, comprobanteId: "..." }` |
+| Diagnóstico | Bandeja → **Diagnóstico** (o botón en Configuración): imprime un recibo de prueba + abre el cajón |
 
 ## Requisitos previos
 
@@ -25,8 +27,9 @@ haya una impresora conectada. Se comunica con el POS vía HTTP en `localhost:797
 2. Ejecutar el instalador → siguiente → instalar
 3. El agente se auto-inicia con Windows (bandeja del sistema)
 4. Clic derecho en el ícono de la bandeja → **Configuración**
-5. Ingresar el nombre exacto de la impresora (Panel de Control → Dispositivos e impresoras)
-6. Guardar y reiniciar
+5. Elegir la impresora de la lista desplegable (se autocompleta con las instaladas)
+6. Ingresar la URL del servidor FactuFAST, Guardar
+7. Pulsar **Diagnóstico** para confirmar impresión + cajón
 
 ## Agregar SumatraPDF (requerido para imprimir tickets)
 
@@ -60,9 +63,16 @@ Respuesta error parcial (ej: cajón abrió pero fallo impresión): `{ "ok": fals
 
 ### `GET http://localhost:7979/status`
 
+Sondea el hardware real (no devuelve `ok` fijo):
+
 ```json
-{ "ok": true, "printer": "EPSON TM-T20", "version": "1.0.0" }
+{ "ok": true, "version": "1.1.0", "printer": "EPSON TM-T20",
+  "printerFound": true, "printerOnline": true, "sumatraOk": true, "serverReachable": true }
 ```
+
+### `POST http://localhost:7979/selftest`
+
+Imprime un recibo de prueba y abre el cajón. `{ "ok": true }` o `{ "ok": false, "errors": [...] }`.
 
 ## Conexión del cajón registrador
 

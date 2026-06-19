@@ -1,7 +1,7 @@
 import { app, Menu, Tray, nativeImage, BrowserWindow, shell, Notification } from 'electron';
 import * as path from 'path';
 import { loadConfig } from './config';
-import { abrirCajon } from './printer';
+import { abrirCajon, probarImpresion, verificarImpresora } from './printer';
 import { log, getLogPath } from './logger';
 
 let tray: Tray | null = null;
@@ -26,10 +26,16 @@ export function createTray(onQuit: () => void): Tray {
 
 async function runHealthCheck(onQuit: () => void): Promise<void> {
   if (!tray) return;
-  const cfg = loadConfig();
-  const healthy = Boolean(cfg.printerName);
+  // Sonda REAL: la impresora existe y está en línea (no solo "hay un nombre escrito").
+  let healthy = false;
+  try {
+    const sonda = await verificarImpresora();
+    healthy = sonda.found;
+  } catch {
+    healthy = false;
+  }
   if (healthy !== currentStatus) {
-    log('INFO', `Health check: estado cambia a ${healthy ? 'OK' : 'SIN IMPRESORA'}`);
+    log('INFO', `Health check: estado cambia a ${healthy ? 'OK' : 'IMPRESORA NO DISPONIBLE'}`);
     updateTrayMenu(tray, healthy, onQuit);
   }
 }
@@ -58,18 +64,28 @@ export function registrarActividad(): void {
   lastActivityTime = new Date();
 }
 
-export function updateTrayMenu(tray: Tray, connected: boolean, onQuit: () => void): void {
+export function updateTrayMenu(tray: Tray, connected: boolean, onQuit: () => void, pendingUpdate?: string): void {
   currentStatus = connected;
   const status = connected ? '● Impresora lista' : '○ Sin impresora configurada';
   const ultima = lastActivityTime
     ? `Última impresión: ${lastActivityTime.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' })}`
     : 'Sin actividad reciente';
 
-  const menu = Menu.buildFromTemplate([
+  const items: Electron.MenuItemConstructorOptions[] = [
     { label: `FactuFAST PrintAgent`, enabled: false },
     { label: status, enabled: false },
     { label: ultima, enabled: false },
     { type: 'separator' },
+  ];
+
+  if (pendingUpdate) {
+    items.unshift(
+      { label: `⬆ Instalar actualización v${pendingUpdate}`, click: () => { const { autoUpdater } = require('electron-updater'); autoUpdater.quitAndInstall(false, true); } },
+      { type: 'separator' },
+    );
+  }
+
+  const menu = Menu.buildFromTemplate([...items,
     {
       label: 'Configuración',
       click: () => openConfigWindow(),
@@ -88,6 +104,21 @@ export function updateTrayMenu(tray: Tray, connected: boolean, onQuit: () => voi
           const msg = (e as Error).message;
           log('ERROR', `Test cajón desde tray: ${msg}`);
           notificarError('Error al abrir cajón', msg);
+        }
+      },
+    },
+    {
+      label: 'Diagnóstico (imprimir prueba + cajón)',
+      click: async () => {
+        const errores: string[] = [];
+        try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
+        try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
+        if (errores.length > 0) {
+          log('ERROR', `Diagnóstico tray: ${errores.join(' | ')}`);
+          notificarError('Diagnóstico con errores', errores.join('\n'));
+        } else {
+          log('INFO', 'Diagnóstico tray: OK');
+          notificarExito('Diagnóstico OK: recibo impreso y cajón abierto');
         }
       },
     },

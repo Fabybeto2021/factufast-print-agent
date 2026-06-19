@@ -59,8 +59,9 @@
   <div class="section">
     <div class="section-title">Impresora térmica</div>
     <label>Nombre de impresora (Windows)</label>
-    <input id="printerName" type="text" placeholder="Ej: EPSON TM-T20" />
-    <p class="hint">Panel de Control → Dispositivos e impresoras → copiar el nombre exacto</p>
+    <input id="printerName" type="text" list="printerList" placeholder="Selecciona o escribe el nombre" autocomplete="off" />
+    <datalist id="printerList"></datalist>
+    <p class="hint">Elige de la lista de impresoras instaladas, o escribe el nombre exacto. <a href="#" id="btnRefreshPrinters">↻ Actualizar lista</a></p>
 
     <label>Interfaz de conexión</label>
     <select id="printerInterface">
@@ -85,12 +86,8 @@
   <div class="section">
     <div class="section-title">Servidor FactuFAST</div>
     <label>URL del servidor</label>
-    <input id="serverUrl" type="text" placeholder="http://localhost:3000" />
-    <p class="hint">Si FactuFAST está en otra PC de la red, usa su IP. Ej: http://192.168.1.50:3000</p>
-
-    <label>Puerto del agente</label>
-    <input id="agentPort" type="number" value="7979" />
-    <p class="hint">Puerto donde este agente escucha (dejar en 7979 salvo conflicto)</p>
+    <input id="serverUrl" type="text" placeholder="https://app.factufast.com" />
+    <p class="hint">URL pública de FactuFAST. Si está en otra PC de la red local, usa su IP. Ej: http://192.168.1.50:3000</p>
 
     <div class="section-title" style="margin-top:14px">Probar impresión de ticket</div>
     <p class="hint" style="margin-bottom:6px">Ingresa el ID de un comprobante real para probar la descarga e impresión</p>
@@ -109,6 +106,7 @@
   </div>
 
   <div class="footer">
+    <button id="btnDiag" style="background:#0ea5e9;color:#fff">Diagnóstico</button>
     <button id="btnTest">Probar cajón</button>
     <button id="btnTicket">Probar ticket</button>
     <button id="btnSave">Guardar</button>
@@ -127,6 +125,26 @@
     }
     ifaceSelect.addEventListener('change', updateIfaceGroups);
 
+    // Poblar el datalist con las impresoras instaladas en Windows
+    async function cargarImpresoras() {
+      try {
+        const printers = await ipcRenderer.invoke('list-printers');
+        const dl = document.getElementById('printerList');
+        dl.innerHTML = '';
+        (printers || []).forEach(name => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          dl.appendChild(opt);
+        });
+      } catch (e) { /* sin impresoras enumeradas — el campo sigue siendo texto libre */ }
+    }
+    document.getElementById('btnRefreshPrinters').addEventListener('click', (e) => {
+      e.preventDefault();
+      cargarImpresoras();
+      showStatus('Lista de impresoras actualizada', 'ok');
+    });
+    cargarImpresoras();
+
     // Cargar config actual
     ipcRenderer.invoke('get-config').then(cfg => {
       document.getElementById('printerName').value      = cfg.printerName      || '';
@@ -135,7 +153,6 @@
       document.getElementById('networkHost').value      = cfg.networkHost      || '';
       document.getElementById('networkPort').value      = cfg.networkPort      || 9100;
       document.getElementById('serverUrl').value        = cfg.serverUrl        || 'http://localhost:3000';
-      document.getElementById('agentPort').value        = cfg.agentPort        || 7979;
       document.getElementById('notificaciones').checked = cfg.notificaciones !== false;
       updateIfaceGroups();
     });
@@ -148,11 +165,22 @@
         networkHost:       document.getElementById('networkHost').value.trim(),
         networkPort:       parseInt(document.getElementById('networkPort').value) || 9100,
         serverUrl:         document.getElementById('serverUrl').value.trim().replace(/\/$/, ''),
-        agentPort:         parseInt(document.getElementById('agentPort').value) || 7979,
         notificaciones:    document.getElementById('notificaciones').checked,
       };
       await ipcRenderer.invoke('save-config', cfg);
-      showStatus('Configuración guardada. Reinicia el agente para aplicar cambios de puerto.', 'ok');
+      showStatus('Configuración guardada.', 'ok');
+    });
+
+    // Diagnóstico: imprime recibo de prueba + abre el cajón
+    document.getElementById('btnDiag').addEventListener('click', async () => {
+      showStatus('Ejecutando diagnóstico (recibo de prueba + cajón)...', 'ok');
+      try {
+        const r = await ipcRenderer.invoke('selftest');
+        if (r.ok) showStatus('Diagnóstico OK: recibo impreso y cajón abierto', 'ok');
+        else showStatus('Diagnóstico con errores: ' + (r.errors || []).join(' | '), 'error');
+      } catch (e) {
+        showStatus('Error en diagnóstico: ' + e.message, 'error');
+      }
     });
 
     // Probar cajón

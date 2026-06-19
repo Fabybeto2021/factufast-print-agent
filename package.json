@@ -1,16 +1,19 @@
 {
   "name": "factufast-print-agent",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "PrintAgent local para FactuFAST — controla impresora térmica y cajón registrador",
   "main": "dist/main.js",
   "author": "FactuFAST",
   "scripts": {
+    "postinstall": "node scripts/ensure-sumatra.js",
     "dev": "tsc && electron dist/main.js",
     "build": "tsc",
+    "test": "tsc && node --test",
     "dist:win": "npm run build && electron-packager . \"FactuFAST PrintAgent\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=release --ignore=vendor --extra-resource=vendor/SumatraPDF.exe --icon=assets/icon.ico",
     "dist:linux": "npm run build && electron-packager . \"FactuFAST PrintAgent\" --platform=linux --arch=x64 --out=release --overwrite --ignore=release --ignore=vendor --extra-resource=vendor/SumatraPDF.exe",
     "dist:all": "npm run dist:win && npm run dist:linux",
-    "dist:installer": "npm run build && electron-builder --win nsis --linux AppImage --publish never"
+    "dist:installer": "npm run build && electron-builder --win nsis --publish never",
+    "dist:installer:linux": "npm run build && electron-builder --linux AppImage --publish never"
   },
   "dependencies": {
     "@serialport/bindings-cpp": "^12.0.1",
