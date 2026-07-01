@@ -172,9 +172,13 @@ export async function abrirCajon(): Promise<void> {
 // Impresión de PDF (RIDE fiscal y boletos de ánfora) vía SumatraPDF
 // ──────────────────────────────────────────────────────────────────────────
 
-/** Descarga el RIDE fiscal (80mm) e imprime con SumatraPDF. */
-export async function imprimirTicket(comprobanteId: string, authToken?: string): Promise<void> {
-  await imprimirPdf(comprobanteId, 'ticket', 'ticket', authToken);
+/**
+ * Descarga el ticket 80mm e imprime con SumatraPDF.
+ * `ticketPdfPath` (opcional) = ruta relativa a un PDF genérico (recibos de cobros,
+ * tickets de Ventas Directas). Si falta, se usa el RIDE fiscal del comprobante.
+ */
+export async function imprimirTicket(comprobanteId: string, authToken?: string, ticketPdfPath?: string): Promise<void> {
+  await imprimirPdf(comprobanteId, 'ticket', 'ticket', authToken, undefined, ticketPdfPath);
 }
 
 /**
@@ -208,6 +212,7 @@ async function imprimirPdf(
   label: string,
   authToken?: string,
   extraHeaders?: Record<string, string>,
+  overridePath?: string,
 ): Promise<ImprimirResult> {
   const cfg = loadConfig();
   if (!cfg.printerName) throw new Error('Nombre de impresora no configurado');
@@ -217,8 +222,12 @@ async function imprimirPdf(
     throw new Error('SumatraPDF.exe no encontrado en: ' + sumatraExe);
   }
 
-  const pdfUrl = `${cfg.serverUrl}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
-  const tmpPdf = path.join(os.tmpdir(), `${label}_${comprobanteId}_${Date.now()}.pdf`);
+  // Documento genérico (cobros/VD) → ruta relativa dada; si no, RIDE del comprobante.
+  const pdfUrl = overridePath
+    ? `${cfg.serverUrl}${overridePath}`
+    : `${cfg.serverUrl}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
+  const idSafe = comprobanteId || 'doc';
+  const tmpPdf = path.join(os.tmpdir(), `${label}_${idSafe}_${Date.now()}.pdf`);
 
   log('INFO', `Descargando ${label} ${comprobanteId} desde ${pdfUrl}`);
 

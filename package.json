@@ -1,6 +1,6 @@
 {
   "name": "factufast-print-agent",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "PrintAgent local para FactuFAST — controla impresora térmica y cajón registrador",
   "main": "dist/main.js",
   "author": "FactuFAST",

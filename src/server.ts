@@ -11,6 +11,9 @@ interface PrintRequest {
   imprimirCupones?: boolean;
   abrirCajon?: boolean;
   authToken?: string;
+  // Documento genérico (recibos de cobros, tickets de Ventas Directas): ruta relativa
+  // al PDF. Si viene, se descarga de ahí en vez de /api/comprobantes/{id}/pdf/ticket.
+  ticketPdfPath?: string;
 }
 
 function getVersion(): string {
@@ -82,7 +85,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
     const body = req.body as PrintRequest;
     const errores: string[] = [];
 
-    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'}`);
+    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'} pdf:${body.ticketPdfPath ?? '-'}`);
 
     try {
       if (body.abrirCajon) {
@@ -95,9 +98,10 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
         }
       }
 
-      if (body.imprimirTicket && body.comprobanteId) {
+      // Ticket: comprobante (URL fija) o documento genérico (ticketPdfPath: cobros/VD).
+      if (body.imprimirTicket && (body.comprobanteId || body.ticketPdfPath)) {
         try {
-          await imprimirTicket(body.comprobanteId, body.authToken);
+          await imprimirTicket(body.comprobanteId ?? '', body.authToken, body.ticketPdfPath);
         } catch (e) {
           const msg = 'impresión: ' + (e instanceof Error ? e.message : String(e));
           errores.push(msg);
