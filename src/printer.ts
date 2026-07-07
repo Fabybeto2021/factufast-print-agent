@@ -69,10 +69,17 @@ function enviarRawWindows(data: Buffer, printerName: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const hex = Array.from(data).map((b) => `0x${b.toString(16).padStart(2, '0')}`).join(',');
     const safeName = printerName.replace(/'/g, "''");
+    // ⚠️ DOC_INFO_1 NECESITA [StructLayout(CharSet=Auto)]: sin él las cadenas del struct
+    // se marshalean ANSI mientras StartDocPrinterW espera Unicode → el datatype llega
+    // corrupto, el documento nunca inicia de verdad y WritePrinter escribe 0 bytes SIN
+    // reportar error. El síntoma era "Recibo de prueba enviado OK" sin papel (y cajón
+    // que nunca se abría). Además: verificar StartDocPrinter (jobId≠0) y que WritePrinter
+    // haya escrito TODOS los bytes — antes se ignoraban ambos resultados (|Out-Null).
     const ps = `
 $bytes = [byte[]]@(${hex})
 Add-Type -TypeDefinition @'
 using System;using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
 public struct DOC_INFO_1{public string pDocName;public string pOutputFile;public string pDataType;}
 public class WinSpool{
   [DllImport("winspool.drv",CharSet=CharSet.Auto)]public static extern bool OpenPrinter(string n,out IntPtr h,IntPtr d);
@@ -84,17 +91,23 @@ public class WinSpool{
   [DllImport("winspool.drv")]public static extern bool EndDocPrinter(IntPtr h);}
 '@
 $h=[IntPtr]::Zero
-if([WinSpool]::OpenPrinter('${safeName}', [ref]$h, [IntPtr]::Zero)){
-  $di=New-Object DOC_INFO_1;$di.pDocName='FactuFAST RAW';$di.pDataType='RAW';$di.pOutputFile=$null
-  [WinSpool]::StartDocPrinter($h,1,[ref]$di)|Out-Null
-  [WinSpool]::StartPagePrinter($h)|Out-Null
-  $buf=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
-  [System.Runtime.InteropServices.Marshal]::Copy($bytes,0,$buf,$bytes.Length)
-  $written=0;[WinSpool]::WritePrinter($h,$buf,$bytes.Length,[ref]$written)|Out-Null
-  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
-  [WinSpool]::EndPagePrinter($h)|Out-Null;[WinSpool]::EndDocPrinter($h)|Out-Null;[WinSpool]::ClosePrinter($h)|Out-Null
-  Write-Output 'OK'
-} else { Write-Error 'OpenPrinter falló (impresora no encontrada o sin acceso)'; exit 1 }
+if(-not [WinSpool]::OpenPrinter('${safeName}', [ref]$h, [IntPtr]::Zero)){
+  Write-Error 'OpenPrinter falló (impresora no encontrada o sin acceso)'; exit 1
+}
+$di=New-Object DOC_INFO_1;$di.pDocName='FactuFAST RAW';$di.pDataType='RAW';$di.pOutputFile=$null
+$job=[WinSpool]::StartDocPrinter($h,1,[ref]$di)
+if($job -eq 0){ [WinSpool]::ClosePrinter($h)|Out-Null; Write-Error 'StartDocPrinter falló (documento RAW rechazado)'; exit 1 }
+[WinSpool]::StartPagePrinter($h)|Out-Null
+$buf=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+[System.Runtime.InteropServices.Marshal]::Copy($bytes,0,$buf,$bytes.Length)
+$written=0
+$okw=[WinSpool]::WritePrinter($h,$buf,$bytes.Length,[ref]$written)
+[System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
+[WinSpool]::EndPagePrinter($h)|Out-Null;[WinSpool]::EndDocPrinter($h)|Out-Null;[WinSpool]::ClosePrinter($h)|Out-Null
+if(-not $okw -or $written -ne $bytes.Length){
+  Write-Error "WritePrinter incompleto: $written de $($bytes.Length) bytes"; exit 1
+}
+Write-Output 'OK'
 `.trim();
 
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
