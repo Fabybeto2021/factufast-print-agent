@@ -271,7 +271,10 @@ async function imprimirPdf(
   await new Promise<void>((resolve, reject) => {
     execFile(
       sumatraExe,
-      ['-print-to', cfg.printerName, '-silent', tmpPdf],
+      // -print-settings "noscale": imprime al 100% (tamaño real). Sin esto SumatraPDF
+      // usa "shrink to fit" y encoge los tickets largos (página más alta que el papel)
+      // en vez de alimentarlos continuos en el rollo térmico.
+      ['-print-to', cfg.printerName, '-print-settings', 'noscale', '-silent', tmpPdf],
       { timeout: 15_000 },
       (err) => {
         try { fs.unlinkSync(tmpPdf); } catch { /* noop */ }
