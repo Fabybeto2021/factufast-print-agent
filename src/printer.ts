@@ -168,6 +168,19 @@ async function enviarRawThermalPrinter(data: Buffer, iface: string): Promise<voi
 // ──────────────────────────────────────────────────────────────────────────
 
 /** Abre el cajón registrador enviando el pulso ESC/POS (pin 2 + pin 5). */
+/**
+ * Imprime bytes ESC/POS que llegan YA construidos (base64 en POST /print).
+ * Existe para el comprobante PROVISIONAL de la venta sin internet (FactuFAST
+ * Desktop): sin conexion no hay servidor que genere el PDF/raster, asi que la
+ * pagina compone el ticket en modo texto y aqui solo se transporta.
+ */
+export async function imprimirEscposInline(base64: string): Promise<void> {
+  const data = Buffer.from(base64, 'base64');
+  if (data.length === 0) throw new Error('escposBase64 vacio o invalido');
+  const cfg = loadConfig();
+  await enviarRaw(data, cfg);
+}
+
 export async function abrirCajon(): Promise<void> {
   const cfg = loadConfig();
   log('INFO', `Abriendo cajón — interfaz: ${cfg.printerInterface}, impresora: "${cfg.printerName}"`);

@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadConfig, AGENT_PORT } from './config';
-import { abrirCajon, imprimirTicket, imprimirCupones, diagnostico, probarImpresion } from './printer';
+import { abrirCajon, imprimirTicket, imprimirCupones, imprimirEscposInline, diagnostico, probarImpresion } from './printer';
 import { log } from './logger';
 
 interface PrintRequest {
@@ -14,6 +14,9 @@ interface PrintRequest {
   // Documento genérico (recibos de cobros, tickets de Ventas Directas): ruta relativa
   // al PDF. Si viene, se descarga de ahí en vez de /api/comprobantes/{id}/pdf/ticket.
   ticketPdfPath?: string;
+  // Bytes ESC/POS ya construidos (v1.3+): comprobante provisional de la venta
+  // offline — el cliente compone el ticket y aquí solo se transporta al hardware.
+  escposBase64?: string;
 }
 
 function getVersion(): string {
@@ -104,6 +107,17 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
           await imprimirTicket(body.comprobanteId ?? '', body.authToken, body.ticketPdfPath);
         } catch (e) {
           const msg = 'impresión: ' + (e instanceof Error ? e.message : String(e));
+          errores.push(msg);
+          log('ERROR', msg);
+        }
+      }
+
+      // Bytes ESC/POS inline (v1.3): ticket provisional offline de FactuFAST Desktop.
+      if (body.escposBase64) {
+        try {
+          await imprimirEscposInline(body.escposBase64);
+        } catch (e) {
+          const msg = 'escpos-inline: ' + (e instanceof Error ? e.message : String(e));
           errores.push(msg);
           log('ERROR', msg);
         }
