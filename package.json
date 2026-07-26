@@ -68,7 +68,8 @@
     "publish": {
       "provider": "github",
       "owner": "Fabybeto2021",
-      "repo": "factufast-print-agent"
+      "repo": "factufast-print-agent",
+      "releaseType": "release"
     }
   }
 }
