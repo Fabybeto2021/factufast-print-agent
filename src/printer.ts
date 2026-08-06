@@ -6,10 +6,24 @@ import * as os from 'os';
 import * as net from 'net';
 import { execFile } from 'child_process';
 import { loadConfig, AgentConfig } from './config';
-import { DRAWER_KICK, construirTicketPrueba, parseCuponIds } from './escpos';
+import { DRAWER_KICK, construirTicketPrueba, parseCuponIds, buildWinspoolScript } from './escpos';
 import { log } from './logger';
 
 const DOWNLOAD_TIMEOUT_MS = 10_000;
+
+// Techo para que el spooler termine de tragarse el trabajo. Un ticket fiscal
+// rasterizado son cientos de KB y en una PC de caja lenta no salen en 8 s. Se queda
+// por debajo de los 30 s que espera el POS antes de dar el ticket por perdido y
+// reimprimirlo por navegador (que produciría un duplicado).
+const WINSPOOL_TIMEOUT_MS = 25_000;
+
+// Inactividad tolerada al conectar/enviar a una impresora de red. Mide silencio del
+// socket, no duración total, así que una transferencia larga que avanza no lo dispara.
+const TCP_IDLE_TIMEOUT_MS = 10_000;
+
+// Margen para que la impresora cierre su lado tras recibir el FIN. Si no cierra
+// (habitual en térmicas de red), damos el envío por bueno igual.
+const TCP_CIERRE_GRACIA_MS = 2_000;
 
 export function getSumatraPath(): string {
   const resourcesPath = process.resourcesPath ?? path.join(__dirname, '..', 'vendor');
@@ -30,9 +44,12 @@ function delay(ms: number): Promise<void> {
 
 /**
  * Envía bytes raw a una impresora térmica según la interfaz configurada.
- * USB (Windows) → spooler winspool (Win32 API, sin nativo). PRIMARIO.
+ * USB (Windows) → spooler winspool (Win32 API, sin nativo). Único camino, sin plan B.
  * Red          → socket TCP directo (módulo net, sin nativo).
- * Serial       → node-thermal-printer (//./COMx). Fallback con nativo.
+ * Serial       → node-thermal-printer (//./COMx), el único que usa binding nativo.
+ *
+ * Debe soportar desde 10 bytes (pulso de cajón) hasta ~400 KB (ticket fiscal
+ * rasterizado); ver `buildWinspoolScript` y la nota de tamaños en CLAUDE.md.
  */
 async function enviarRaw(data: Buffer, cfg: AgentConfig): Promise<void> {
   if (cfg.printerInterface === 'network') {
@@ -48,14 +65,11 @@ async function enviarRaw(data: Buffer, cfg: AgentConfig): Promise<void> {
   // USB (default)
   if (!cfg.printerName) throw new Error('Nombre de impresora no configurado');
   if (os.platform() === 'win32') {
-    try {
-      await enviarRawWindows(data, cfg.printerName);
-      return;
-    } catch (err) {
-      log('WARN', `winspool falló (${(err as Error).message}), intentando node-thermal-printer`);
-      await enviarRawThermalPrinter(data, `printer:${cfg.printerName}`);
-      return;
-    }
+    // Sin fallback: la interfaz `printer:` de node-thermal-printer exige un módulo
+    // driver nativo que este agente nunca pasa, así que lanzaba "No driver set!"
+    // SIEMPRE — un plan B que solo servía para enmascarar el error real de winspool.
+    await enviarRawWindows(data, cfg.printerName);
+    return;
   }
   // SO no-Windows con interfaz USB → node-thermal-printer
   await enviarRawThermalPrinter(data, `printer:${cfg.printerName}`);
@@ -64,55 +78,32 @@ async function enviarRaw(data: Buffer, cfg: AgentConfig): Promise<void> {
 /**
  * Envía bytes raw al spooler de Windows usando la Win32 API vía PowerShell.
  * No requiere que la impresora esté compartida en red ni módulos nativos.
+ *
+ * Los bytes viajan por un archivo temporal, no dentro del script — ver
+ * `buildWinspoolScript` para el porqué (la línea de comandos de Windows tiene techo).
  */
+let rawSeq = 0;
+
 function enviarRawWindows(data: Buffer, printerName: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const hex = Array.from(data).map((b) => `0x${b.toString(16).padStart(2, '0')}`).join(',');
-    const safeName = printerName.replace(/'/g, "''");
-    // ⚠️ DOC_INFO_1 NECESITA [StructLayout(CharSet=Auto)]: sin él las cadenas del struct
-    // se marshalean ANSI mientras StartDocPrinterW espera Unicode → el datatype llega
-    // corrupto, el documento nunca inicia de verdad y WritePrinter escribe 0 bytes SIN
-    // reportar error. El síntoma era "Recibo de prueba enviado OK" sin papel (y cajón
-    // que nunca se abría). Además: verificar StartDocPrinter (jobId≠0) y que WritePrinter
-    // haya escrito TODOS los bytes — antes se ignoraban ambos resultados (|Out-Null).
-    const ps = `
-$bytes = [byte[]]@(${hex})
-Add-Type -TypeDefinition @'
-using System;using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
-public struct DOC_INFO_1{public string pDocName;public string pOutputFile;public string pDataType;}
-public class WinSpool{
-  [DllImport("winspool.drv",CharSet=CharSet.Auto)]public static extern bool OpenPrinter(string n,out IntPtr h,IntPtr d);
-  [DllImport("winspool.drv")]public static extern bool ClosePrinter(IntPtr h);
-  [DllImport("winspool.drv",CharSet=CharSet.Auto)]public static extern int StartDocPrinter(IntPtr h,int l,ref DOC_INFO_1 di);
-  [DllImport("winspool.drv")]public static extern bool StartPagePrinter(IntPtr h);
-  [DllImport("winspool.drv")]public static extern bool WritePrinter(IntPtr h,IntPtr b,int n,out int w);
-  [DllImport("winspool.drv")]public static extern bool EndPagePrinter(IntPtr h);
-  [DllImport("winspool.drv")]public static extern bool EndDocPrinter(IntPtr h);}
-'@
-$h=[IntPtr]::Zero
-if(-not [WinSpool]::OpenPrinter('${safeName}', [ref]$h, [IntPtr]::Zero)){
-  Write-Error 'OpenPrinter falló (impresora no encontrada o sin acceso)'; exit 1
-}
-$di=New-Object DOC_INFO_1;$di.pDocName='FactuFAST RAW';$di.pDataType='RAW';$di.pOutputFile=$null
-$job=[WinSpool]::StartDocPrinter($h,1,[ref]$di)
-if($job -eq 0){ [WinSpool]::ClosePrinter($h)|Out-Null; Write-Error 'StartDocPrinter falló (documento RAW rechazado)'; exit 1 }
-[WinSpool]::StartPagePrinter($h)|Out-Null
-$buf=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
-[System.Runtime.InteropServices.Marshal]::Copy($bytes,0,$buf,$bytes.Length)
-$written=0
-$okw=[WinSpool]::WritePrinter($h,$buf,$bytes.Length,[ref]$written)
-[System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
-[WinSpool]::EndPagePrinter($h)|Out-Null;[WinSpool]::EndDocPrinter($h)|Out-Null;[WinSpool]::ClosePrinter($h)|Out-Null
-if(-not $okw -or $written -ne $bytes.Length){
-  Write-Error "WritePrinter incompleto: $written de $($bytes.Length) bytes"; exit 1
-}
-Write-Output 'OK'
-`.trim();
+    // El contador evita que dos trabajos del mismo milisegundo compartan archivo.
+    const tmpBin = path.join(os.tmpdir(), `ff_raw_${process.pid}_${Date.now()}_${++rawSeq}.bin`);
+    const limpiar = () => { try { fs.unlinkSync(tmpBin); } catch { /* noop */ } };
+
+    try {
+      fs.writeFileSync(tmpBin, data);
+    } catch (err) {
+      reject(new Error(`No se pudo escribir el archivo temporal: ${(err as Error).message}`));
+      return;
+    }
+
+    const ps = buildWinspoolScript(tmpBin, printerName);
+    log('INFO', `winspool: enviando ${data.length} bytes a "${printerName}"`);
 
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
-      { timeout: 8000 },
+      { timeout: WINSPOOL_TIMEOUT_MS },
       (err, stdout, stderr) => {
+        limpiar();
         if (err || !/OK/.test(stdout || '')) {
           reject(new Error(stderr?.trim() || err?.message || 'PowerShell/winspool falló'));
         } else {
@@ -127,20 +118,34 @@ function enviarRawTcp(data: Buffer, host: string, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
     let done = false;
+    let graceTimer: NodeJS.Timeout | null = null;
     const finish = (err?: Error) => {
       if (done) return;
       done = true;
+      if (graceTimer) clearTimeout(graceTimer);
       socket.destroy();
       err ? reject(err) : resolve();
     };
-    socket.setTimeout(5000);
-    socket.on('timeout', () => finish(new Error(`Timeout conectando a ${host}:${port}`)));
+
+    // El timeout de inactividad solo vigila la conexión y el envío: una vez que los
+    // bytes están drenados deja de aplicar (ver abajo).
+    socket.setTimeout(TCP_IDLE_TIMEOUT_MS);
+    socket.on('timeout', () => finish(new Error(`Sin respuesta de ${host}:${port}`)));
     socket.on('error', (err) => finish(err));
+    socket.on('close', () => finish());
+
     socket.connect(port, host, () => {
-      socket.write(data, (err) => {
-        if (err) return finish(err);
-        // pequeño margen para que el buffer salga antes de cerrar
-        setTimeout(() => finish(), 150);
+      // `end(data)` escribe y CIERRA con FIN: el kernel drena lo pendiente antes de
+      // cortar. Antes se hacía `write()` + `destroy()` 150 ms después, y destroy
+      // descarta lo que siga en el buffer → el final de un ticket largo hacia una
+      // impresora lenta se perdía.
+      socket.end(data, () => {
+        // Bytes entregados al SO y FIN enviado: el trabajo está hecho. Muchas
+        // térmicas de red no cierran su lado, así que esperar 'close' indefinidamente
+        // acabaría en un timeout que reportaría como fallo algo que SÍ se imprimió.
+        // Damos un margen corto para un cierre limpio y, si no llega, resolvemos.
+        socket.setTimeout(0);
+        graceTimer = setTimeout(() => finish(), TCP_CIERRE_GRACIA_MS);
       });
     });
   });

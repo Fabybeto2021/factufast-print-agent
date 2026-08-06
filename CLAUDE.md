@@ -28,8 +28,8 @@ Single-process Electron app with no renderer (system tray only). The tray UI ope
 |------|----------------|
 | `main.ts` | Entry point. Single-instance lock, IPC handlers (`get/save-config`, `list-printers`, `diagnostico`, `selftest`), starts HTTP server, configures `electron-updater`. |
 | `server.ts` | Express on `127.0.0.1:7979`. Endpoints: `GET /status` (real probe), `POST /print`, `POST /selftest`. CORS + Private Network Access preflight. |
-| `printer.ts` | Drawer + printing. `enviarRaw()` picks transport: **USB → winspool (PRIMARY, no native module)**, network → TCP socket (`net`), serial → `node-thermal-printer` (fallback). `abrirCajon()`, `imprimirTicket()`, `imprimirCupones()` (two-phase ACK), `probarImpresion()`, `verificarImpresora()` (WMI probe), `verificarServidor()`, `diagnostico()`, `listarImpresoras()`. |
-| `escpos.ts` | **Pure, electron-free** ESC/POS helpers (`DRAWER_KICK`, `construirTicketPrueba`, `parseCuponIds`). Imported by `printer.ts`; unit-tested in `test/escpos.test.js`. |
+| `printer.ts` | Drawer + printing. `enviarRaw()` picks transport: **USB → winspool (Windows-only, no native module, NO fallback)**, network → TCP socket (`net`), serial → `node-thermal-printer`. `abrirCajon()`, `imprimirTicket()`, `imprimirCupones()` (two-phase ACK), `imprimirEscposInline()`, `probarImpresion()`, `verificarImpresora()` (WMI probe), `verificarServidor()`, `diagnostico()`, `listarImpresoras()`. |
+| `escpos.ts` | **Pure, electron-free** ESC/POS helpers (`DRAWER_KICK`, `construirTicketPrueba`, `parseCuponIds`, `buildWinspoolScript`). Imported by `printer.ts`; unit-tested in `test/escpos.test.js`. |
 | `config.ts` | `AgentConfig` + `loadConfig()`/`saveConfig()` → `userData/config.json`, merged with `DEFAULT_CONFIG`. `AGENT_PORT = 7979`. |
 | `tray.ts` | Tray icon + menu (Configuración / Ver logs / Probar cajón / **Diagnóstico** / Salir). Health check every 30 s uses the **real** `verificarImpresora()` probe. |
 | `logger.ts` | Appends to `userData/agent.log`. Rotates at 1 MB, keeps **5** numbered files (`.1`..`.5`). |
@@ -37,9 +37,12 @@ Single-process Electron app with no renderer (system tray only). The tray UI ope
 ### HTTP API (consumed by FactuFAST POS at `src/lib/pos/printAgent.ts`)
 
 ```
-POST /print  { comprobanteId?, imprimirTicket?, imprimirCupones?, abrirCajon?, authToken? }
+POST /print  { comprobanteId?, imprimirTicket?, imprimirCupones?, abrirCajon?, authToken?,
+               ticketPdfPath?,        ← generic doc (cobros / Ventas Directas), v1.2.0+
+               escposBase64? }        ← pre-built ESC/POS bytes, v1.3.0+ (usable v1.4.0+)
   → 200 { ok: true }
   → 207 { ok: false, errors: string[] }   ← partial failure (e.g. drawer OK, print failed)
+  body limit 10 MB — a rasterized fiscal ticket is 150–400 KB (see "Raw payload size")
 
 GET  /status → { ok, version, printer, printerFound, printerOnline, sumatraOk, serverReachable, ... }
   ok = printerFound && sumatraOk. Probes real hardware/server — no longer a fixed ok:true.
@@ -59,7 +62,24 @@ The POS sends the user's Supabase `access_token` as `authToken`; the agent forwa
 PC ──USB──► Thermal printer ──RJ11/RJ12──► Cash drawer
 ```
 
-`abrirCajon()` sends both pin-2 (`1B 70 00 3C 3C`) and pin-5 (`1B 70 01 3C 3C`). On Windows USB the **primary** path is raw bytes to the spooler via `winspool.drv` P/Invoke (no native module) — `node-thermal-printer` is only a fallback (serial). This removed the fragile native-binding dependency on the hot path.
+`abrirCajon()` sends both pin-2 (`1B 70 00 3C 3C`) and pin-5 (`1B 70 01 3C 3C`). On Windows USB the path is raw bytes to the spooler via `winspool.drv` P/Invoke (no native module); `node-thermal-printer` is used only for serial (`//./COMx`) and non-Windows USB. This removed the fragile native-binding dependency on the hot path.
+
+⚠️ **There is deliberately NO fallback from winspool to `node-thermal-printer` on Windows.** Its `printer:NAME` interface requires a native `driver` module object this agent never passes, so it threw *"No driver set!"* on every call — a plan B that only ever masked the real winspool error in the logs.
+
+### Raw payload size — the v1.4.0 fix
+
+**A fiscal ticket rasterized to ESC/POS is 150–400 KB, and until v1.4.0 the transport could not carry it.** Two ceilings, both invisible to `/selftest`:
+
+1. `express.json()` with no `limit` → Express 4 default is **100 KB** → **HTTP 413** before the handler ever runs.
+2. `enviarRawWindows` embedded the bytes as hex **in the PowerShell command line** (~5 chars/byte) against `CreateProcess`'s **32,767**-char ceiling → only ~6 KB fit.
+
+Small payloads passed both — drawer kick (10 B), test receipt (~300 B), offline provisional in text mode (~4 KB) — which is exactly why diagnostics looked healthy while **every real invoice** failed and fell back to PDF printing (where the driver's paper form crops long tickets). Reported as invoice `004-001-000000211` (21 items): printed up to the last line item, no totals, no authorization number, no barcode.
+
+Rules now:
+- **Bytes go through a temp file, never inside the script.** `buildWinspoolScript(dataFilePath, printerName)` lives in `escpos.ts` (pure → tested); `printer.ts` writes the temp file, runs it, and deletes it in the callback. Tests assert the script stays a constant ~2 KB regardless of ticket size.
+- `execFile` timeout is **25 s** (POS waits 30 s before giving the ticket up for lost and reprinting via browser — a duplicate).
+- **TCP uses `socket.end(data)` and waits for close**, not `write()` + `destroy()` after 150 ms: `destroy()` discards whatever is still buffered, truncating the tail of a long ticket to a slow network printer. If the printer never closes its side (common), a 2 s grace timer resolves anyway — the bytes were already flushed and FIN sent.
+- The web side gates on **agent ≥ 1.4.0** (`MIN_VER_ESCPOS_INLINE` in `src/lib/pos/printAgent.ts`), not ≥1.3.0. Sending ESC/POS to a 1.3.x agent yields a 413 with no `errors` array, which drives FactuFAST's `debeFallback` into its conservative branch → a browser print dialog on every sale.
 
 ### Private Network Access (PNA)
 

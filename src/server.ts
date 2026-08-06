@@ -30,7 +30,13 @@ function getVersion(): string {
 
 export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => void): void {
   const app = express();
-  app.use(express.json());
+  // ⚠️ El default de express.json() son 100 KB y un ticket fiscal rasterizado
+  // (`escposBase64`) pesa 150–400 KB → 413 antes de llegar al handler, con lo que
+  // NINGUNA factura real llegaba a imprimirse por ESC/POS: caían todas al PDF, que es
+  // donde el driver las recorta si exceden su formulario de papel. Los payloads
+  // pequeños (cajón, recibo de prueba, provisional offline) sí pasaban, y por eso el
+  // /selftest se veía sano.
+  app.use(express.json({ limit: '10mb' }));
 
   // CORS: permite localhost siempre + el serverUrl configurado (para producción/Vercel)
   app.use((req, res, next) => {
