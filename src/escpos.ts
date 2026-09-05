@@ -92,6 +92,115 @@ Write-Output 'OK'
 `.trim();
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Patrón de ráster para el diagnóstico
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Filas de puntos por comando `GS v 0`. ESPEJO de `BAND_HEIGHT` en el servidor
+ * (`src/lib/sri/png-a-escpos.ts` de FactuFAST): la prueba solo sirve si le manda a la
+ * impresora comandos de la MISMA forma y tamaño que un ticket real.
+ */
+const BAND_HEIGHT = 24;
+
+/** Puntos de una línea del cabezal de 80mm (72mm @203dpi). */
+export const RASTER_ANCHO = 576;
+
+export interface RasterPruebaOpts {
+  /** Alto en puntos. 203 puntos = 1 pulgada = 25.4 mm de papel. */
+  filas: number;
+  /** Rotular el bloque (sale como texto ESC/POS antes y después del ráster). */
+  titulo: string;
+}
+
+function setBit(bits: Uint8Array, widthBytes: number, y: number, x: number): void {
+  bits[y * widthBytes + (x >> 3)] |= 0x80 >> (x & 7);
+}
+
+/**
+ * Dibuja un patrón reconocible a simple vista y lo emite como ráster ESC/POS.
+ *
+ * El patrón está elegido para que un humano diagnostique de un vistazo:
+ *  - **reglas horizontales de ancho completo** cada 40 filas → son la peor carga para el
+ *    cabezal y, si la impresora envuelve las filas, se parten;
+ *  - una **escalera diagonal** → cualquier desplazamiento horizontal (ancho de línea mal
+ *    interpretado) la convierte en una diagonal rota en vez de una escalera limpia;
+ *  - **huecos en blanco** entre bloques → ejercitan el avance `ESC J`, que es lo que el
+ *    servidor emite en lugar de rasterizar papel blanco.
+ *
+ * El flujo va rotulado con texto ESC/POS ANTES y DESPUÉS. Esa es la parte que más informa:
+ * si el rótulo final sale impreso pero el ráster del medio salió como caracteres, la
+ * impresora perdió la sincronía dentro de un `GS v 0` — exactamente el fallo reportado.
+ */
+export function construirRasterPrueba(opts: RasterPruebaOpts): Buffer {
+  const { filas, titulo } = opts;
+  const widthBytes = Math.ceil(RASTER_ANCHO / 8);
+  const bits = new Uint8Array(filas * widthBytes);
+  const vacia = new Uint8Array(filas);
+
+  for (let y = 0; y < filas; y++) {
+    const ciclo = y % 40;
+    if (ciclo < 3) {
+      // Regla de ancho completo.
+      for (let x = 0; x < RASTER_ANCHO; x++) setBit(bits, widthBytes, y, x);
+    } else if (ciclo >= 8 && ciclo < 28) {
+      // Escalera: un bloque de 64 puntos que se desplaza en cada peldaño.
+      const desde = (Math.floor(y / 40) * 24) % (RASTER_ANCHO - 64);
+      for (let x = desde; x < desde + 64; x++) setBit(bits, widthBytes, y, x);
+    } else {
+      vacia[y] = 1;
+    }
+  }
+
+  const out: number[] = [];
+  const ESC = 0x1b;
+  const GS = 0x1d;
+  // Nada de secuencias de escape dentro de cadenas: los bytes de control se empujan
+  // explícitos para que el fuente siga siendo texto plano legible y diffeable.
+  const centrar = () => out.push(ESC, 0x61, 0x01);
+  const izquierda = () => out.push(ESC, 0x61, 0x00);
+  const salto = (n = 1) => { for (let i = 0; i < n; i++) out.push(0x0a); };
+  const texto = (t: string) => { for (const byte of Buffer.from(t, 'latin1')) out.push(byte); };
+
+  out.push(ESC, 0x40);                                     // ESC @ init
+  out.push(GS, 0x50, 203, 203);                            // GS P — 1 unidad de avance = 1 punto
+  centrar();
+  texto(titulo);
+  salto();
+  izquierda();
+  texto('Alto: ' + filas + ' pts (' + ((filas / 203) * 25.4).toFixed(0) + ' mm)');
+  salto(2);
+
+  let y = 0;
+  while (y < filas) {
+    if (vacia[y]) {
+      let fin = y;
+      while (fin < filas && vacia[fin]) fin++;
+      let resto = fin - y;
+      while (resto > 0) { const n = Math.min(255, resto); out.push(ESC, 0x4a, n); resto -= n; }
+      y = fin;
+      continue;
+    }
+    const tope = Math.min(y + BAND_HEIGHT, filas);
+    let fin = y + 1;
+    while (fin < tope && !vacia[fin]) fin++;
+    const rows = fin - y;
+    out.push(GS, 0x76, 0x30, 0x00, widthBytes & 0xff, (widthBytes >> 8) & 0xff, rows & 0xff, (rows >> 8) & 0xff);
+    for (let i = y * widthBytes; i < fin * widthBytes; i++) out.push(bits[i]);
+    y = fin;
+  }
+
+  // Si esta línea sale legible, la impresora llegó al final del flujo sin desincronizarse.
+  centrar();
+  salto();
+  texto('FIN OK - el raster llego completo');
+  salto();
+  izquierda();
+  salto(2);
+  out.push(GS, 0x56, 0x00);                                // GS V 0 — corte total
+  return Buffer.from(out);
+}
+
 /** Normaliza el header X-Cupon-Ids ("id1,id2") → ['id1','id2']. */
 export function parseCuponIds(header?: string | string[]): string[] {
   if (!header) return [];

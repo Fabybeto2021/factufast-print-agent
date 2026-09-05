@@ -44,11 +44,50 @@ POST /print  { comprobanteId?, imprimirTicket?, imprimirCupones?, abrirCajon?, a
   → 207 { ok: false, errors: string[] }   ← partial failure (e.g. drawer OK, print failed)
   body limit 10 MB — a rasterized fiscal ticket is 150–400 KB (see "Raw payload size")
 
-GET  /status → { ok, version, printer, printerFound, printerOnline, sumatraOk, serverReachable, ... }
+GET  /status → { ok, version, printer, printerFound, printerOnline, sumatraOk, serverReachable,
+                 modoTicket, ... }                    ← modoTicket: 'auto' | 'pdf', v1.5.0+
   ok = printerFound && sumatraOk. Probes real hardware/server — no longer a fixed ok:true.
 
-POST /selftest → prints a test receipt + opens the drawer. 200 ok / 207 with errors[].
+POST /selftest            → prints a test receipt + opens the drawer. 200 ok / 207 with errors[].
+POST /selftest {raster:'corto'|'largo'} → prints a GS v 0 RASTER test pattern (v1.5.0+)
 ```
+
+`POST /print` answers `{ ok: true, nada_que_imprimir: true }` when the body asked for nothing at
+all (paperless mode: no ticket, no coupons, no drawer). It used to answer a plain `ok: true` —
+the agent claiming to have printed something it never printed. In one month of a real cashier's
+log that was **410 documents** indistinguishable from a real print.
+
+### `modoTicket` — the per-machine escape hatch (v1.5.0)
+
+`config.json` gains `modoTicket: 'auto' | 'pdf'` (Configuración → *Modo de impresión del
+ticket*). `auto` is the behavior of every prior version; `pdf` makes the POS skip the ESC/POS
+path **on this machine only** (`printAgent.ts` reads it from `/status`).
+
+It exists because whether a thermal printer digests a long `GS v 0` raster at the speed the
+spooler hands it over is a property of the **hardware**, not of the tenant. A printer that
+loses sync mid-raster needs to go back to PDF *today*, without a deploy and without touching
+the other cashiers. ⚠️ With `pdf`, check the driver's paper form is set to **continuous roll**
+or long tickets come out cropped again — the very thing v1.4.0 fixed.
+
+### `construirRasterPrueba` — the diagnostic that was missing
+
+⚠️ **`probarImpresion` proves almost nothing.** It sends a ~250-byte TEXT receipt: it passes on
+a machine where every real invoice fails. That is exactly what hid the v1.3.x transport ceiling,
+and what left a real "the tickets print garbage" report undiagnosable for a month. The fiscal
+ticket travels as a `GS v 0` **raster**, so that path has to be exercisable on demand:
+
+- **corto** (400 dots ≈ 5 cm) → does this printer understand `GS v 0` at all?
+- **largo** (2400 dots ≈ 30 cm) → does it survive the throughput of a whole credit ticket?
+
+The pattern is full-width rules (worst case for the head, and they break if the printer wraps
+rows) + a diagonal staircase (any horizontal offset turns it into a broken diagonal) + blank
+gaps (they exercise the `ESC J` feed the server emits instead of rasterizing white paper). It is
+labelled with ESC/POS **text before and after**: if the trailing `FIN OK` prints but the drawing
+in the middle came out as characters, the printer lost sync *inside* a `GS v 0`.
+
+`BAND_HEIGHT` here is a **mirror of the server's** (`src/lib/sri/png-a-escpos.ts` in FactuFAST):
+the test is only worth anything if it hands the printer commands of the same shape and size as a
+real ticket.
 
 The POS sends the user's Supabase `access_token` as `authToken`; the agent forwards it as `Authorization: Bearer`. **The FactuFAST PDF routes honor this Bearer via `createClientFromRequest()`** — without it the agent's download returns 401 (this was a root cause of "nothing prints").
 
@@ -78,6 +117,7 @@ Small payloads passed both — drawer kick (10 B), test receipt (~300 B), offlin
 Rules now:
 - **Bytes go through a temp file, never inside the script.** `buildWinspoolScript(dataFilePath, printerName)` lives in `escpos.ts` (pure → tested); `printer.ts` writes the temp file, runs it, and deletes it in the callback. Tests assert the script stays a constant ~2 KB regardless of ticket size.
 - `execFile` timeout is **25 s** (POS waits 30 s before giving the ticket up for lost and reprinting via browser — a duplicate).
+- ⚠️ **`enviarRawWindows` logs the RESULT, not just the send.** Until v1.5.0 it wrote `winspool: enviando N bytes` and nothing else — no success line, no duration — while `imprimirEscposInline` logged nothing at all. Consequence: a full month of a cashier's log could not answer *"did the ticket print?"*, which is precisely the question a "it prints garbage" report needs answered. Now every job closes with `winspool: N bytes entregados OK en X ms` (the duration also exposes how close a long ticket ran to the 25 s ceiling) and every failure logs **`stderr`**, where the real reason lives — `err.message` alone just says "Command failed".
 - **TCP uses `socket.end(data)` and waits for close**, not `write()` + `destroy()` after 150 ms: `destroy()` discards whatever is still buffered, truncating the tail of a long ticket to a slow network printer. If the printer never closes its side (common), a 2 s grace timer resolves anyway — the bytes were already flushed and FIN sent.
 - The web side gates on **agent ≥ 1.4.0** (`MIN_VER_ESCPOS_INLINE` in `src/lib/pos/printAgent.ts`), not ≥1.3.0. Sending ESC/POS to a 1.3.x agent yields a 413 with no `errors` array, which drives FactuFAST's `debeFallback` into its conservative branch → a browser print dialog on every sale.
 

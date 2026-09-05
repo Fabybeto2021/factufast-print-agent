@@ -42,6 +42,8 @@
     #btnTest:hover { background: #059669; }
     #btnTicket { background: #f59e0b; color: #fff; }
     #btnTicket:hover { background: #d97706; }
+    #btnRaster, #btnRasterLargo { background: #8b5cf6; color: #fff; }
+    #btnRaster:hover, #btnRasterLargo:hover { background: #7c3aed; }
     #status { margin-top: 12px; padding: 8px 12px; border-radius: 8px; font-size: 12px; display: none; }
     #status.ok    { background: #d1fae5; color: #065f46; display: block; }
     #status.error { background: #fee2e2; color: #991b1b; display: block; }
@@ -69,6 +71,18 @@
       <option value="serial">Puerto Serie (COM)</option>
       <option value="network">Red / Ethernet</option>
     </select>
+
+    <label>Modo de impresión del ticket</label>
+    <select id="modoTicket">
+      <option value="auto">Automático (recomendado)</option>
+      <option value="pdf">Forzar PDF — solo si esta impresora falla con el ticket directo</option>
+    </select>
+    <p class="hint">
+      El ticket se manda a la impresora como puntos (rápido y sin recortes). Si en ESTA caja
+      el ticket sale con caracteres raros a mitad de página, pon <b>Forzar PDF</b> y revisa que
+      el papel del driver esté configurado como <b>rollo continuo</b>. Usa antes
+      <b>Probar ráster</b> para confirmarlo.
+    </p>
 
     <div id="serialGroup" style="display:none">
       <label>Puerto Serie</label>
@@ -109,6 +123,8 @@
     <button id="btnDiag" style="background:#0ea5e9;color:#fff">Diagnóstico</button>
     <button id="btnTest">Probar cajón</button>
     <button id="btnTicket">Probar ticket</button>
+    <button id="btnRaster" title="Imprime un patrón de puntos corto: responde si esta impresora entiende el ráster del ticket">Probar ráster</button>
+    <button id="btnRasterLargo" title="Patrón largo (~30 cm): reproduce el caudal de un ticket a crédito entero">Ráster largo</button>
     <button id="btnSave">Guardar</button>
   </div>
   <div id="status"></div>
@@ -149,6 +165,7 @@
     ipcRenderer.invoke('get-config').then(cfg => {
       document.getElementById('printerName').value      = cfg.printerName      || '';
       document.getElementById('printerInterface').value = cfg.printerInterface || 'usb';
+      document.getElementById('modoTicket').value       = cfg.modoTicket === 'pdf' ? 'pdf' : 'auto';
       document.getElementById('serialPort').value       = cfg.serialPort       || 'COM1';
       document.getElementById('networkHost').value      = cfg.networkHost      || '';
       document.getElementById('networkPort').value      = cfg.networkPort      || 9100;
@@ -161,6 +178,7 @@
       const cfg = {
         printerName:       document.getElementById('printerName').value.trim(),
         printerInterface:  document.getElementById('printerInterface').value,
+        modoTicket:        document.getElementById('modoTicket').value,
         serialPort:        document.getElementById('serialPort').value.trim(),
         networkHost:       document.getElementById('networkHost').value.trim(),
         networkPort:       parseInt(document.getElementById('networkPort').value) || 9100,
@@ -182,6 +200,28 @@
         showStatus('Error en diagnóstico: ' + e.message, 'error');
       }
     });
+
+    // Probar el RASTER: es el camino por el que viaja el ticket fiscal de verdad. El
+    // recibo de "Probar ticket" son ~250 bytes de texto y pasa siempre, incluso en una
+    // caja donde toda factura real sale mal.
+    async function probarRaster(largo) {
+      const etiqueta = largo ? 'largo (~30 cm)' : 'corto (~5 cm)';
+      showStatus('Imprimiendo patron de raster ' + etiqueta + '...', 'ok');
+      try {
+        const r = await ipcRenderer.invoke('selftest-raster', largo);
+        if (r.ok) {
+          showStatus('Raster enviado (' + r.filas + ' puntos). Mira el papel: si el dibujo salio '
+            + 'limpio y se lee "FIN OK", esta impresora aguanta el ticket directo. Si a mitad '
+            + 'aparecieron caracteres raros, pon "Forzar PDF" en el modo de impresion.', 'ok');
+        } else {
+          showStatus('Error: ' + (r.errors || []).join(' | '), 'error');
+        }
+      } catch (e) {
+        showStatus('Error probando raster: ' + e.message, 'error');
+      }
+    }
+    document.getElementById('btnRaster').addEventListener('click', () => probarRaster(false));
+    document.getElementById('btnRasterLargo').addEventListener('click', () => probarRaster(true));
 
     // Probar cajón
     document.getElementById('btnTest').addEventListener('click', async () => {

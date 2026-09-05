@@ -2,7 +2,10 @@ import express, { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadConfig, AGENT_PORT } from './config';
-import { abrirCajon, imprimirTicket, imprimirCupones, imprimirEscposInline, diagnostico, probarImpresion } from './printer';
+import {
+  abrirCajon, imprimirTicket, imprimirCupones, imprimirEscposInline, diagnostico, probarImpresion,
+  probarRaster, RASTER_PRUEBA_CORTO, RASTER_PRUEBA_LARGO,
+} from './printer';
 import { log } from './logger';
 
 interface PrintRequest {
@@ -76,9 +79,34 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
     }
   });
 
-  // Diagnóstico activo: imprime un recibo de prueba + abre el cajón.
-  app.post('/selftest', async (_req: Request, res: Response) => {
+  // Diagnóstico activo: recibo de prueba + cajón, y opcionalmente el RÁSTER.
+  //
+  // ⚠️ `raster` no es un extra: el recibo de texto son ~250 bytes y pasa siempre, incluso
+  // en una caja donde toda factura real sale mal (fue lo que escondió el fallo de
+  // transporte de la v1.3.x, y lo que dejó sin diagnosticar la caja de SPPLAST). El ticket
+  // fiscal viaja como ráster `GS v 0`, así que hay que poder ejercitar ESE camino:
+  //   { "raster": "corto" } → ¿esta impresora entiende GS v 0?
+  //   { "raster": "largo" } → ¿aguanta el caudal de un ticket entero?
+  app.post('/selftest', async (req: Request, res: Response) => {
     const errores: string[] = [];
+    const raster = (req.body as { raster?: string } | undefined)?.raster;
+
+    if (raster === 'corto' || raster === 'largo') {
+      const filas = raster === 'largo' ? RASTER_PRUEBA_LARGO : RASTER_PRUEBA_CORTO;
+      try {
+        await probarRaster(filas, `PRUEBA DE RASTER (${raster})`);
+      } catch (e) {
+        errores.push('raster: ' + (e as Error).message);
+      }
+      const diagR = await diagnostico().catch(() => null);
+      if (errores.length > 0) {
+        onStatusChange(false, errores);
+        return res.status(207).json({ ok: false, errors: errores, diagnostico: diagR });
+      }
+      onStatusChange(true);
+      return res.json({ ok: true, raster, filas, diagnostico: diagR });
+    }
+
     try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
     try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
     const diag = await diagnostico().catch(() => null);
@@ -93,8 +121,15 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
   app.post('/print', async (req: Request, res: Response) => {
     const body = req.body as PrintRequest;
     const errores: string[] = [];
+    // ⚠️ Un POST que no pide NADA (típicamente el modo ahorro de papel: sin ticket, sin
+    // cupones y sin cajón) respondía `ok:true` — el agente afirmaba haber impreso algo que
+    // nunca imprimió. En el log de SPPLAST son 410 documentos indistinguibles de una
+    // impresión real. Se sigue respondiendo 200 (no es un error), pero declarado.
+    const nadaQueImprimir =
+      !body.abrirCajon && !body.escposBase64 && !body.imprimirCupones &&
+      !(body.imprimirTicket && (body.comprobanteId || body.ticketPdfPath));
 
-    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'} pdf:${body.ticketPdfPath ?? '-'}`);
+    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'} pdf:${body.ticketPdfPath ?? '-'}${nadaQueImprimir ? ' — SIN NADA QUE IMPRIMIR' : ''}`);
 
     try {
       if (body.abrirCajon) {
@@ -146,7 +181,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
         res.status(207).json({ ok: false, errors: errores });
       } else {
         onStatusChange(true);
-        res.json({ ok: true });
+        res.json({ ok: true, ...(nadaQueImprimir ? { nada_que_imprimir: true } : {}) });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

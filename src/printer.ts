@@ -6,7 +6,9 @@ import * as os from 'os';
 import * as net from 'net';
 import { execFile } from 'child_process';
 import { loadConfig, AgentConfig } from './config';
-import { DRAWER_KICK, construirTicketPrueba, parseCuponIds, buildWinspoolScript } from './escpos';
+import {
+  DRAWER_KICK, construirTicketPrueba, parseCuponIds, buildWinspoolScript, construirRasterPrueba,
+} from './escpos';
 import { log } from './logger';
 
 const DOWNLOAD_TIMEOUT_MS = 10_000;
@@ -99,14 +101,26 @@ function enviarRawWindows(data: Buffer, printerName: string): Promise<void> {
 
     const ps = buildWinspoolScript(tmpBin, printerName);
     log('INFO', `winspool: enviando ${data.length} bytes a "${printerName}"`);
+    const t0 = Date.now();
 
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
       { timeout: WINSPOOL_TIMEOUT_MS },
       (err, stdout, stderr) => {
         limpiar();
+        const ms = Date.now() - t0;
         if (err || !/OK/.test(stdout || '')) {
-          reject(new Error(stderr?.trim() || err?.message || 'PowerShell/winspool falló'));
+          // ⚠️ El motivo REAL vive en stderr: OpenPrinter / StartDocPrinter / WritePrinter
+          // lo escriben con Write-Error. `err.message` a secas solo dice "Command failed".
+          const detalle = stderr?.trim() || err?.message || 'PowerShell/winspool falló';
+          log('ERROR', `winspool: FALLÓ tras ${ms} ms — ${detalle}`);
+          reject(new Error(detalle));
         } else {
+          // ⚠️ Esta línea no es ruido: hasta ago-2026 el camino ESC/POS solo dejaba el
+          // "enviando N bytes" y NADA sobre el resultado, así que un mes entero de log no
+          // podía responder "¿se imprimió?" — que es justo lo que hizo falta para
+          // diagnosticar la caja de SPPLAST. La duración además delata si se rozó el
+          // techo de WINSPOOL_TIMEOUT_MS.
+          log('INFO', `winspool: ${data.length} bytes entregados OK en ${ms} ms`);
           resolve();
         }
       });
@@ -183,7 +197,9 @@ export async function imprimirEscposInline(base64: string): Promise<void> {
   const data = Buffer.from(base64, 'base64');
   if (data.length === 0) throw new Error('escposBase64 vacio o invalido');
   const cfg = loadConfig();
+  const t0 = Date.now();
   await enviarRaw(data, cfg);
+  log('INFO', `escpos: ticket de ${data.length} bytes impreso OK en ${Date.now() - t0} ms`);
 }
 
 export async function abrirCajon(): Promise<void> {
@@ -398,6 +414,29 @@ export async function probarImpresion(): Promise<void> {
   log('INFO', 'Recibo de prueba enviado OK');
 }
 
+/** Alto en puntos de cada prueba de ráster (203 puntos = 1 pulgada de papel). */
+export const RASTER_PRUEBA_CORTO = 400;    // ~5 cm — ¿esta impresora entiende GS v 0?
+export const RASTER_PRUEBA_LARGO = 2400;   // ~30 cm — el largo de un ticket a crédito real
+
+/**
+ * Imprime un patrón de ráster ESC/POS.
+ *
+ * ⚠️ Es la prueba que le faltaba al diagnóstico. `probarImpresion` manda un recibo de
+ * TEXTO de ~250 bytes: pasa siempre, incluso en una máquina donde toda factura real sale
+ * mal — el mismo agujero que ya escondió el fallo de transporte de la v1.3.x. El ticket
+ * fiscal viaja como ráster `GS v 0` y ese es el camino que hay que poder ejercitar.
+ *
+ * Con `corto` se responde "¿entiende ráster?"; con `largo`, "¿aguanta un ticket entero?".
+ * Si el rótulo FIN sale impreso pero el dibujo del medio salió como caracteres, la
+ * impresora perdió la sincronía dentro del ráster.
+ */
+export async function probarRaster(filas: number, titulo: string): Promise<void> {
+  const cfg = loadConfig();
+  log('INFO', `Imprimiendo raster de prueba — ${filas} filas (${titulo})`);
+  await enviarRaw(construirRasterPrueba({ filas, titulo }), cfg);
+  log('INFO', `Raster de prueba (${filas} filas) enviado OK`);
+}
+
 export interface SondaImpresora { found: boolean; online: boolean; detalle: string; }
 
 /** Verifica que la impresora exista y esté en línea (sin imprimir nada). */
@@ -459,6 +498,8 @@ export function verificarServidor(): Promise<boolean> {
 export interface SelfTestReport {
   printerName: string;
   printerInterface: string;
+  /** Lo consume el POS (`printAgent.ts`) para saltarse el ESC/POS en esta caja. */
+  modoTicket: string;
   printerFound: boolean;
   printerOnline: boolean;
   sumatraOk: boolean;
@@ -473,6 +514,7 @@ export async function diagnostico(): Promise<SelfTestReport> {
   return {
     printerName: cfg.printerName,
     printerInterface: cfg.printerInterface,
+    modoTicket: cfg.modoTicket,
     printerFound: imp.found,
     printerOnline: imp.online,
     sumatraOk: sumatraDisponible(),

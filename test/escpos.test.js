@@ -8,6 +8,7 @@ const {
   construirTicketPrueba,
   parseCuponIds,
   buildWinspoolScript,
+  construirRasterPrueba,
 } = require('../dist/escpos.js');
 
 test('DRAWER_KICK = pin2 + pin5 (10 bytes, secuencias ESC p correctas)', () => {
@@ -67,4 +68,60 @@ test('parseCuponIds normaliza string, array y vacíos', () => {
   assert.deepStrictEqual(parseCuponIds(''), []);
   assert.deepStrictEqual(parseCuponIds(undefined), []);
   assert.deepStrictEqual(parseCuponIds(' , , '), []);
+});
+
+// ── construirRasterPrueba ────────────────────────────────────────────────────
+// El recibo de texto (~250 bytes) pasa siempre, incluso en una caja donde toda factura
+// real sale mal: fue lo que escondió el fallo de transporte de v1.3.x y lo que dejó sin
+// diagnosticar la impresora de SPPLAST. Esta prueba ejercita el camino REAL del ticket
+// fiscal (ráster GS v 0 en bandas), así que su forma tiene que ser la misma.
+
+/** Camina el flujo y devuelve las bandas, avances y filas totales. */
+function leerRaster(buf) {
+  const r = { bandas: [], avances: [], filas: 0, mayorPayload: 0, anchoBytes: null };
+  for (let i = 0; i < buf.length; ) {
+    if (buf[i] === 0x1d && buf[i + 1] === 0x76 && buf[i + 2] === 0x30) {
+      const anchoBytes = buf[i + 4] | (buf[i + 5] << 8);
+      const rows = buf[i + 6] | (buf[i + 7] << 8);
+      r.anchoBytes = anchoBytes;
+      r.bandas.push(rows);
+      r.filas += rows;
+      r.mayorPayload = Math.max(r.mayorPayload, anchoBytes * rows);
+      i += 8 + anchoBytes * rows;
+    } else if (buf[i] === 0x1b && buf[i + 1] === 0x4a) {
+      r.avances.push(buf[i + 2]);
+      r.filas += buf[i + 2];
+      i += 3;
+    } else {
+      i++;
+    }
+  }
+  return r;
+}
+
+test('construirRasterPrueba emite exactamente las filas pedidas (bandas + avances)', () => {
+  const buf = construirRasterPrueba({ filas: 400, titulo: 'PRUEBA' });
+  const r = leerRaster(buf);
+  assert.strictEqual(r.filas, 400, 'el papel avanzado debe ser el alto pedido');
+  assert.strictEqual(r.anchoBytes, 72, '576 puntos = 72 bytes por fila');
+  assert.ok(r.avances.length > 0, 'debe ejercitar el avance ESC J de los huecos en blanco');
+});
+
+test('ninguna banda supera el buffer de una térmica barata', () => {
+  const r = leerRaster(construirRasterPrueba({ filas: 2400, titulo: 'LARGO' }));
+  // Espejo de BAND_HEIGHT en el servidor (png-a-escpos.ts): 24 filas × 72 bytes = 1.728.
+  assert.ok(Math.max(...r.bandas) <= 24, 'bandas de 24 filas como mucho');
+  assert.ok(r.mayorPayload <= 2048, `payload máximo ${r.mayorPayload} > 2 KB`);
+});
+
+test('el ráster de prueba se rotula y se corta, y fija la unidad de avance', () => {
+  const buf = construirRasterPrueba({ filas: 400, titulo: 'PRUEBA DE RASTER (corto)' });
+  const txt = buf.toString('latin1');
+  assert.deepStrictEqual([...buf.subarray(0, 2)], [0x1b, 0x40]);        // ESC @
+  assert.deepStrictEqual([...buf.subarray(2, 6)], [0x1d, 0x50, 203, 203]); // GS P 203 203
+  assert.ok(txt.includes('PRUEBA DE RASTER (corto)'));
+  // Si el rótulo final sale impreso pero el dibujo salió como caracteres, la impresora
+  // perdió la sincronía DENTRO de un GS v 0 — el fallo que se está buscando.
+  assert.ok(txt.includes('FIN OK'));
+  assert.deepStrictEqual([...buf.subarray(buf.length - 3)], [0x1d, 0x56, 0x00]); // GS V 0
 });

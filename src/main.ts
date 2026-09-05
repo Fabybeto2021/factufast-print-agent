@@ -2,7 +2,10 @@ import { app, Tray, ipcMain } from 'electron';
 import { startServer } from './server';
 import { createTray, updateTrayMenu, notificarError, notificarExito, registrarActividad } from './tray';
 import { loadConfig, saveConfig } from './config';
-import { listarImpresoras, probarImpresion, abrirCajon, diagnostico } from './printer';
+import {
+  listarImpresoras, probarImpresion, abrirCajon, diagnostico,
+  probarRaster, RASTER_PRUEBA_CORTO, RASTER_PRUEBA_LARGO,
+} from './printer';
 import { log } from './logger';
 
 // Robustez: nunca morir en silencio por un error no capturado — registrar y seguir
@@ -54,6 +57,18 @@ app.on('ready', () => {
     try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
     try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
     return { ok: errores.length === 0, errors: errores };
+  });
+
+  // Prueba del camino REAL del ticket fiscal (ráster GS v 0), que el recibo de texto de
+  // `selftest` no ejercita — ver la nota de `probarRaster`.
+  ipcMain.handle('selftest-raster', async (_event, largo: boolean) => {
+    const filas = largo ? RASTER_PRUEBA_LARGO : RASTER_PRUEBA_CORTO;
+    try {
+      await probarRaster(filas, largo ? 'PRUEBA DE RASTER (largo)' : 'PRUEBA DE RASTER (corto)');
+      return { ok: true, filas };
+    } catch (e) {
+      return { ok: false, filas, errors: ['raster: ' + (e as Error).message] };
+    }
   });
 
   // Auto-update: revisa GitHub Releases 10 segundos después de iniciar
