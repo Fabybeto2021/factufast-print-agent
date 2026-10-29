@@ -7,6 +7,7 @@ import {
   probarRaster, RASTER_PRUEBA_CORTO, RASTER_PRUEBA_LARGO,
 } from './printer';
 import { log } from './logger';
+import { origenPermitido, baseDescarga } from './origenes';
 
 interface PrintRequest {
   comprobanteId?: string;
@@ -41,19 +42,13 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
   // /selftest se veía sano.
   app.use(express.json({ limit: '10mb' }));
 
-  // CORS: permite localhost siempre + el serverUrl configurado (para producción/Vercel)
+  // CORS: localhost, el serverUrl configurado y los dominios de la plataforma (v1.6.0:
+  // la caja puede entrar por app.reslez.com aunque este agente apunte a serviplast.pro).
   app.use((req, res, next) => {
     const origin = req.headers.origin ?? '';
     const cfg = loadConfig();
-    const configuredOrigin = cfg.serverUrl || '';
 
-    const isAllowed =
-      !origin ||
-      origin.startsWith('http://localhost') ||
-      origin.startsWith('http://127.0.0.1') ||
-      (configuredOrigin && origin === configuredOrigin);
-
-    if (isAllowed) {
+    if (origenPermitido(origin, cfg.serverUrl, cfg.origenesPermitidos ?? [])) {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -129,7 +124,12 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
       !body.abrirCajon && !body.escposBase64 && !body.imprimirCupones &&
       !(body.imprimirTicket && (body.comprobanteId || body.ticketPdfPath));
 
-    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'} pdf:${body.ticketPdfPath ?? '-'}${nadaQueImprimir ? ' — SIN NADA QUE IMPRIMIR' : ''}`);
+    // Los PDF se descargan del MISMO origen que pidió la impresión (v1.6.0): la caja
+    // decide a qué dominio va, no el `serverUrl` que alguien escribió en esta PC.
+    const cfgPrint = loadConfig();
+    const base = baseDescarga(req.headers.origin, cfgPrint.serverUrl, cfgPrint.origenesPermitidos ?? []);
+
+    log('INFO', `POST /print — cajón:${body.abrirCajon} ticket:${body.imprimirTicket} cupones:${body.imprimirCupones} id:${body.comprobanteId ?? '-'} pdf:${body.ticketPdfPath ?? '-'} desde:${base || '-'}${nadaQueImprimir ? ' — SIN NADA QUE IMPRIMIR' : ''}`);
 
     try {
       if (body.abrirCajon) {
@@ -145,7 +145,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
       // Ticket: comprobante (URL fija) o documento genérico (ticketPdfPath: cobros/VD).
       if (body.imprimirTicket && (body.comprobanteId || body.ticketPdfPath)) {
         try {
-          await imprimirTicket(body.comprobanteId ?? '', body.authToken, body.ticketPdfPath);
+          await imprimirTicket(body.comprobanteId ?? '', body.authToken, body.ticketPdfPath, base);
         } catch (e) {
           const msg = 'impresión: ' + (e instanceof Error ? e.message : String(e));
           errores.push(msg);
@@ -168,7 +168,7 @@ export function startServer(onStatusChange: (ok: boolean, errors?: string[]) => 
       // el cajón esté en modo ahorro de papel). 204 del servidor = nada que imprimir.
       if (body.imprimirCupones && body.comprobanteId) {
         try {
-          await imprimirCupones(body.comprobanteId, body.authToken);
+          await imprimirCupones(body.comprobanteId, body.authToken, base);
         } catch (e) {
           const msg = 'cupones: ' + (e instanceof Error ? e.message : String(e));
           errores.push(msg);

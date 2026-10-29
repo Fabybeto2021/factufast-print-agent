@@ -24,6 +24,8 @@ export interface AgentConfig {
   networkPort: number;
   serverUrl: string;
   notificaciones: boolean;
+  /** Orígenes https extra que pueden pedir impresiones (además de serverUrl y los de la plataforma). */
+  origenesPermitidos?: string[];
 }
 
 export const AGENT_PORT = 7979;

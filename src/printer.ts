@@ -10,6 +10,7 @@ import {
   DRAWER_KICK, construirTicketPrueba, parseCuponIds, buildWinspoolScript, construirRasterPrueba,
 } from './escpos';
 import { log } from './logger';
+import { baseDescarga } from './origenes';
 
 const DOWNLOAD_TIMEOUT_MS = 10_000;
 
@@ -224,8 +225,10 @@ export async function abrirCajon(): Promise<void> {
  * `ticketPdfPath` (opcional) = ruta relativa a un PDF genérico (recibos de cobros,
  * tickets de Ventas Directas). Si falta, se usa el RIDE fiscal del comprobante.
  */
-export async function imprimirTicket(comprobanteId: string, authToken?: string, ticketPdfPath?: string): Promise<void> {
-  await imprimirPdf(comprobanteId, 'ticket', 'ticket', authToken, undefined, ticketPdfPath);
+export async function imprimirTicket(
+  comprobanteId: string, authToken?: string, ticketPdfPath?: string, base?: string,
+): Promise<void> {
+  await imprimirPdf(comprobanteId, 'ticket', 'ticket', authToken, undefined, ticketPdfPath, base);
 }
 
 /**
@@ -235,14 +238,15 @@ export async function imprimirTicket(comprobanteId: string, authToken?: string, 
  * impresión falla, el boleto sigue reimprimible (no se pierde).
  * 204 del servidor = nada que imprimir (digital / ya impresos) → no es error.
  */
-export async function imprimirCupones(comprobanteId: string, authToken?: string): Promise<void> {
+export async function imprimirCupones(comprobanteId: string, authToken?: string, base?: string): Promise<void> {
+  const servidor = base || baseDescarga(undefined, loadConfig().serverUrl);
   const { printed, cuponIds } = await imprimirPdf(
-    comprobanteId, 'cupones', 'cupones', authToken, { 'X-Print-Agent': '1' },
+    comprobanteId, 'cupones', 'cupones', authToken, { 'X-Print-Agent': '1' }, undefined, servidor,
   );
   if (printed && cuponIds.length > 0) {
-    const cfg = loadConfig();
     try {
-      await confirmarCupones(cfg.serverUrl, comprobanteId, cuponIds, authToken);
+      // La confirmación va al MISMO servidor del que salieron los boletos.
+      await confirmarCupones(servidor, comprobanteId, cuponIds, authToken);
       log('INFO', `Cupones ${comprobanteId} confirmados (${cuponIds.length})`);
     } catch (err) {
       // El boleto ya salió impreso; si la confirmación falla queda reimprimible.
@@ -260,9 +264,12 @@ async function imprimirPdf(
   authToken?: string,
   extraHeaders?: Record<string, string>,
   overridePath?: string,
+  base?: string,
 ): Promise<ImprimirResult> {
   const cfg = loadConfig();
   if (!cfg.printerName) throw new Error('Nombre de impresora no configurado');
+  // Servidor de descarga: el origen que pidió la impresión (v1.6.0); sin él, serverUrl.
+  const servidor = base || baseDescarga(undefined, cfg.serverUrl);
 
   const sumatraExe = getSumatraPath();
   if (!fs.existsSync(sumatraExe)) {
@@ -271,8 +278,8 @@ async function imprimirPdf(
 
   // Documento genérico (cobros/VD) → ruta relativa dada; si no, RIDE del comprobante.
   const pdfUrl = overridePath
-    ? `${cfg.serverUrl}${overridePath}`
-    : `${cfg.serverUrl}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
+    ? `${servidor}${overridePath}`
+    : `${servidor}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
   const idSafe = comprobanteId || 'doc';
   const tmpPdf = path.join(os.tmpdir(), `${label}_${idSafe}_${Date.now()}.pdf`);
 

@@ -125,9 +125,19 @@ Rules now:
 
 Browsers are tightening calls from HTTPS pages to `http://localhost`. `server.ts` answers the PNA preflight with `Access-Control-Allow-Private-Network: true`, so a Chrome/Edge update won't silently block the agent.
 
+### Allowed origins and download server (v1.6.0)
+
+The platform moved from `www.serviplast.pro` to `app.reslez.com` (31-oct-2026) and both domains serve the same app for weeks. Up to v1.5.0 the agent accepted **only the exact origin of its `serverUrl`** (CORS) and always downloaded PDFs **from `serverUrl`** — so a till opened on the new domain with the agent still pointing at the old one could not print (browser dialog on every sale), and every till would break the day the old domain went away.
+
+`src/origenes.ts` (pure, tested in `test/origenes.test.js`):
+- `origenPermitido(origin, serverUrl, extra)` — localhost (**exact host**, not the old `startsWith('http://localhost')`, which also let `http://localhost.evil.com` through), the configured `serverUrl`, the closed list `ORIGENES_PLATAFORMA`, and optional `origenesPermitidos` from `config.json`.
+- `baseDescarga(origin, serverUrl)` — PDFs (ticket, cupones and the cupones ACK) are fetched from **the same origin that asked for the print**; without an `Origin` header, from `serverUrl`. The agent follows the till, not the other way round.
+- ⚠️ The list is **closed on purpose**: the agent opens the drawer and receives the cashier's session token. Accepting any https origin would let any page open on that PC kick the drawer or receive the token.
+- Safe while the fleet is mixed: for a till whose page origin equals its `serverUrl` (every till before the move) behaviour is byte-for-byte the same.
+
 ### Config storage
 
-`%APPDATA%\FactuFAST PrintAgent\config.json`. Fields: `printerName`, `printerInterface` (`usb|serial|network`), `serialPort`, `networkHost`, `networkPort`, `serverUrl`, `notificaciones`. The config window populates a printer **dropdown** (datalist) from `list-printers` (PowerShell `Get-Printer`) and has a **Diagnóstico** button. (The dead `agentPort` field was removed.)
+`%APPDATA%\FactuFAST PrintAgent\config.json`. Fields: `printerName`, `printerInterface` (`usb|serial|network`), `serialPort`, `networkHost`, `networkPort`, `serverUrl`, `notificaciones`, optional `origenesPermitidos` (extra https origins, v1.6.0). The config window populates a printer **dropdown** (datalist) from `list-printers` (PowerShell `Get-Printer`) and has a **Diagnóstico** button. (The dead `agentPort` field was removed.)
 
 ### Key constraints
 
