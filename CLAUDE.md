@@ -134,6 +134,7 @@ The platform moved from `www.serviplast.pro` to `app.reslez.com` (31-oct-2026) a
 - `baseDescarga(origin, serverUrl)` — PDFs (ticket, cupones and the cupones ACK) are fetched from **the same origin that asked for the print**; without an `Origin` header, from `serverUrl`. The agent follows the till, not the other way round.
 - ⚠️ The list is **closed on purpose**: the agent opens the drawer and receives the cashier's session token. Accepting any https origin would let any page open on that PC kick the drawer or receive the token.
 - Safe while the fleet is mixed: for a till whose page origin equals its `serverUrl` (every till before the move) behaviour is byte-for-byte the same.
+- `migrarServerUrl(url)` — since 1-nov-2026 `serviplast.pro` only **redirects** to `app.reslez.com` (and later goes back to its owner, SPPLAST). `https.get` does not follow redirects, so `loadConfig()` reads a `serverUrl` on the retired domain as `SERVIDOR_ACTUAL`; the file is rewritten the next time the config is saved. ⚠️ The retired domains stay in `ORIGENES_PLATAFORMA` while the redirect lasts (rollback); **remove them before the domain is handed back**, or the owner's pages could open the drawer and receive the till token.
 
 ### Config storage
 

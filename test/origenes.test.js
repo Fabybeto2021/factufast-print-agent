@@ -63,3 +63,19 @@ test('la lista de la plataforma incluye el dominio nuevo y el viejo', () => {
   assert.ok(ORIGENES_PLATAFORMA.includes(NUEVO));
   assert.ok(ORIGENES_PLATAFORMA.includes(VIEJO));
 });
+
+test('un agente con el dominio retirado (serviplast.pro) pasa solo a app.reslez.com', () => {
+  // serviplast.pro solo redirige y https.get no sigue redirecciones; más adelante el
+  // dominio vuelve a su dueño. Sin la migración, una impresión sin Origin descargaría
+  // de un sitio que ya no es la plataforma.
+  const { migrarServerUrl, SERVIDOR_ACTUAL } = require('../dist/origenes.js');
+  assert.strictEqual(SERVIDOR_ACTUAL, NUEVO);
+  assert.strictEqual(migrarServerUrl(VIEJO), NUEVO);
+  assert.strictEqual(migrarServerUrl('https://serviplast.pro/'), NUEVO);
+  assert.strictEqual(migrarServerUrl('HTTPS://WWW.SERVIPLAST.PRO:443'), NUEVO);
+  // Lo demás no se toca.
+  assert.strictEqual(migrarServerUrl('https://beta.reslez.com'), 'https://beta.reslez.com');
+  assert.strictEqual(migrarServerUrl('http://192.168.1.50:3000'), 'http://192.168.1.50:3000');
+  assert.strictEqual(migrarServerUrl('https://otro.serviplast.pro'), 'https://otro.serviplast.pro');
+  assert.strictEqual(migrarServerUrl(''), '');
+});

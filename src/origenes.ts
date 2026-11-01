@@ -24,6 +24,23 @@ export const ORIGENES_PLATAFORMA: readonly string[] = [
   'https://serviplast.pro',
 ];
 
+/**
+ * Dominios retirados → el actual. Desde el 1-nov-2026 `serviplast.pro` solo REDIRIGE a
+ * app.reslez.com y más adelante vuelve a su dueño (SPPLAST) para su propia web. Un
+ * agente con ese `serverUrl` descargaría —en las peticiones sin `Origin`— de un sitio
+ * que ya no es la plataforma, y `https.get` no sigue redirecciones. `loadConfig` lo lee
+ * como el dominio actual.
+ * ⚠️ Siguen en ORIGENES_PLATAFORMA mientras dure la redirección (marcha atrás posible);
+ * quitarlos de ahí ANTES de devolverle el dominio a su dueño: ese día sus páginas no
+ * pueden abrir el cajón ni recibir el token de la caja.
+ */
+export const SERVIDOR_ACTUAL = 'https://app.reslez.com';
+const SERVIDORES_RETIRADOS: readonly string[] = ['https://www.serviplast.pro', 'https://serviplast.pro'];
+
+export function migrarServerUrl(url: string): string {
+  return SERVIDORES_RETIRADOS.includes(normalizarOrigen(url)) ? SERVIDOR_ACTUAL : url;
+}
+
 /** `https://Host:443/ruta/` → `https://host`. Cadena vacía si no es una URL válida. */
 export function normalizarOrigen(url: string | null | undefined): string {
   if (!url) return '';

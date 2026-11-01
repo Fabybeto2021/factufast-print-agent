@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+import { migrarServerUrl } from './origenes';
 
 /**
  * Modo de impresión del ticket fiscal en ESTA caja.
@@ -48,7 +49,11 @@ function configPath(): string {
 export function loadConfig(): AgentConfig {
   try {
     const raw = fs.readFileSync(configPath(), 'utf-8');
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    const cfg: AgentConfig = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    // serviplast.pro se retiró (1-nov-2026): se lee como app.reslez.com. El archivo se
+    // reescribe la próxima vez que se guarde la configuración.
+    cfg.serverUrl = migrarServerUrl(String(cfg.serverUrl ?? ''));
+    return cfg;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
