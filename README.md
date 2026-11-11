@@ -48,6 +48,12 @@ npm run dist:linux   # Genera .AppImage para Linux
 
 ## API
 
+Desde la 1.7.0 el agente solo atiende peticiones con `Host` 127.0.0.1:7979 o localhost:7979, y si traen `Origin` tiene que ser el `serverUrl` configurado, app.reslez.com, beta.reslez.com o uno de `origenesPermitidos`. Todo `POST` exige `Content-Type: application/json` (si no, 415). Ejemplo:
+
+```
+curl -X POST http://127.0.0.1:7979/selftest -H "Content-Type: application/json" -d "{}"
+```
+
 ### `POST http://localhost:7979/print`
 
 ```json

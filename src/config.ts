@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { migrarServerUrl } from './origenes';
+import { migrarServerUrl, SERVIDOR_ACTUAL } from './origenes';
 
 /**
  * Modo de impresión del ticket fiscal en ESTA caja.
@@ -27,6 +27,11 @@ export interface AgentConfig {
   notificaciones: boolean;
   /** Orígenes https extra que pueden pedir impresiones (además de serverUrl y los de la plataforma). */
   origenesPermitidos?: string[];
+  /**
+   * v1.7.0 — aceptar cualquier `http://localhost:*` (solo PCs de desarrollo). Se escribe a
+   * mano en config.json; la ventana de configuración no lo ofrece.
+   */
+  permitirOrigenLocal?: boolean;
 }
 
 export const AGENT_PORT = 7979;
@@ -38,7 +43,9 @@ const DEFAULT_CONFIG: AgentConfig = {
   serialPort: 'COM1',
   networkHost: '192.168.1.100',
   networkPort: 9100,
-  serverUrl: 'http://localhost:3000',
+  // Hasta la 1.6.0 era http://localhost:3000: un agente nunca configurado aceptaba como
+  // origen cualquier página servida en ese puerto de la PC.
+  serverUrl: SERVIDOR_ACTUAL,
   notificaciones: true,
 };
 
@@ -48,7 +55,9 @@ function configPath(): string {
 
 export function loadConfig(): AgentConfig {
   try {
-    const raw = fs.readFileSync(configPath(), 'utf-8');
+    // Sin BOM: un config.json guardado desde PowerShell 5.1 o el Bloc de notas lo trae, y
+    // JSON.parse fallaría y la caja quedaría con los valores por defecto.
+    const raw = fs.readFileSync(configPath(), 'utf-8').replace(/^\uFEFF/, '');
     const cfg: AgentConfig = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
     // serviplast.pro se retiró (1-nov-2026): se lee como app.reslez.com. El archivo se
     // reescribe la próxima vez que se guarde la configuración.

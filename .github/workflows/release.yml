@@ -1,66 +1,189 @@
 name: Build & Release PrintAgent
 
+# tag v* → instalador NSIS (Windows) + AppImage (Linux) publicados en el Release, con
+# latest.yml para que electron-updater actualice SOLO a toda la flota de cajas.
+#
+# Como cada versión llega sola a todas las cajas, este flujo es la puerta más sensible
+# del sistema. Desde la 1.7.0 va en DOS etapas:
+#
+#  1. COMPILAR (build-windows, build-linux) — sin permiso de escritura (`contents: read`).
+#     `npm ci`, SumatraPDF por huella, pruebas, electron-builder con `--publish never`,
+#     fuses comprobados y huellas SHA-256. Aquí corre todo el código de terceros
+#     (scripts de instalación de npm, recompilación de módulos nativos): con un token de
+#     solo lectura, una dependencia comprometida no puede publicar nada.
+#  2. PUBLICAR (publicar) — único trabajo con `contents: write`, en el entorno
+#     `publicar-agente`. Solo descarga lo compilado y lo sube al Release; no instala nada
+#     con npm. Con «Required reviewers» configurado en ese entorno, ESPERA la aprobación
+#     del dueño. (Se eligió esto y no el Release en borrador: un borrador no lo ve
+#     electron-updater y ya pasó que quedara olvidado — la 1.3.0 nunca llegó a las cajas.)
+#
+# ⚠️ Lo que este archivo NO puede impedir (se cierra en la configuración de GitHub):
+#  - Un tag empujado sobre un commit VIEJO corre el release.yml de ESE commit, que no
+#    tiene ni la aprobación ni la separación. Y quien tenga un token con permiso de
+#    escritura puede crear un Release por la API sin pasar por ningún flujo. Hace falta:
+#    ruleset de tags `*` (crear/mover/borrar solo el dueño), «Immutable releases»,
+#    el entorno `publicar-agente` con revisores obligatorios y despliegue limitado a
+#    tags `v*`, y 2FA. La defensa completa sería firmar el código (publisherName en
+#    electron-updater) — fuera de alcance por costo.
+#
+# Además:
+#  - El tag tiene que coincidir con la versión de package.json (electron-builder publica
+#    en `v<versión>` sin mirar el tag: quien aprueba vería un nombre y publicaría otro).
+#  - Acciones fijadas por COMMIT, no por etiqueta (una etiqueta se puede mover).
+#    Para actualizarlas: `git ls-remote --tags https://github.com/<acción>`.
+#  - Sin caché de npm: una publicación es rara y así no se lee nada de otras ejecuciones.
 on:
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: '20'
-
-      - name: Instalar dependencias
-        run: npm install
-
-      - name: Descargar SumatraPDF portable
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: El tag coincide con la versión
+        shell: pwsh
         run: |
-          mkdir -p vendor
-          curl.exe -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" -o vendor/SumatraPDF.exe
-        shell: bash
-
-      - name: Compilar TypeScript
-        run: npm run build
-
-      # --publish always: sube .exe + latest.yml al GitHub Release (necesario para electron-updater)
-      - name: Build y publicar instalador Windows
-        run: npx electron-builder --win nsis --publish always
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$v") { throw "El tag $($env:GITHUB_REF_NAME) no coincide con package.json (v$v)" }
+      - name: Instalar dependencias (exactas)
+        run: npm ci
+      - name: SumatraPDF con huella comprobada
+        run: node scripts/ensure-sumatra.js --estricto
+      - name: Pruebas
+        run: npm test
+      - name: Compilar instalador Windows (sin publicar)
+        run: npx electron-builder --win nsis --publish never
+      # Desde la 1.8.0 (Electron 44) el ejecutable lleva fuses; antes no hay nada que comprobar.
+      # Va ANTES de publicar: un instalador sin fuses no llega a ninguna caja.
+      # FORCE_COLOR=0 y el -replace quitan los códigos de color: en GitHub Actions la
+      # herramienta colorea el nombre del fuse y «RunAsNode is Disabled» deja de coincidir.
+      - name: Comprobar fuses
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: '0'
+        run: |
+          if (-not (Get-Content package.json -Raw | ConvertFrom-Json).build.electronFuses) { 'Sin fuses declarados (≤ 1.7.x)'; exit 0 }
+          # El @electron/fuses que trae electron-builder (del lockfile): no se baja nada al compilar.
+          $salida = (npx --no-install electron-fuses read --app "release/win-unpacked/FactuFAST PrintAgent.exe") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'No se pudieron leer los fuses' }
+          $salida = $salida -replace '\x1b\[[0-9;]*m', ''
+          $salida
+          foreach ($f in 'RunAsNode is Disabled', 'EnableNodeCliInspectArguments is Disabled',
+                         'EnableNodeOptionsEnvironmentVariable is Disabled', 'OnlyLoadAppFromAsar is Enabled',
+                         'EnableEmbeddedAsarIntegrityValidation is Enabled', 'EnableCookieEncryption is Enabled') {
+            if (-not $salida.Contains($f)) { throw "Fuse sin aplicar: $f" }
+          }
+      - name: Archivos de actualización y huella SHA-256
+        shell: pwsh
+        run: |
+          if (-not (Test-Path release/latest.yml)) { throw 'Falta release/latest.yml: electron-updater no vería la versión' }
+          Get-ChildItem release -Filter *.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii release/SHA256SUMS-windows.txt
+          Get-Content release/SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agente-windows
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+            release/SHA256SUMS-windows.txt
 
   build-linux:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: '20'
-
-      - name: Instalar dependencias
-        run: npm install
-
-      - name: Descargar SumatraPDF portable
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: El tag coincide con la versión
         run: |
-          mkdir -p vendor
-          curl -L "https://www.sumatrapdfreader.org/dl/rel/3.5.2/SumatraPDF-3.5.2-64.exe" -o vendor/SumatraPDF.exe
-
-      - name: Compilar TypeScript
-        run: npm run build
-
-      - name: Build y publicar AppImage Linux
-        run: npx electron-builder --linux AppImage --publish always
+          v="$(node -p "require('./package.json').version")"
+          [ "$GITHUB_REF_NAME" = "v$v" ] || { echo "El tag $GITHUB_REF_NAME no coincide con package.json (v$v)"; exit 1; }
+      - name: Instalar dependencias (exactas)
+        run: npm ci
+      - name: SumatraPDF con huella comprobada
+        run: node scripts/ensure-sumatra.js --estricto
+      - name: Pruebas
+        run: npm test
+      - name: Compilar AppImage Linux (sin publicar)
+        run: npx electron-builder --linux AppImage --publish never
+      # Igual que en Windows: desde la 1.8.0 el ejecutable lleva fuses y se comprueban
+      # ANTES de publicar.
+      - name: Comprobar fuses
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: '0'
+        run: |
+          if (-not (Get-Content package.json -Raw | ConvertFrom-Json).build.electronFuses) { 'Sin fuses declarados (≤ 1.7.x)'; exit 0 }
+          $salida = (npx --no-install electron-fuses read --app "release/linux-unpacked/factufast-print-agent") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'No se pudieron leer los fuses' }
+          $salida = $salida -replace '\x1b\[[0-9;]*m', ''
+          $salida
+          foreach ($f in 'RunAsNode is Disabled', 'EnableNodeCliInspectArguments is Disabled',
+                         'EnableNodeOptionsEnvironmentVariable is Disabled', 'OnlyLoadAppFromAsar is Enabled',
+                         'EnableEmbeddedAsarIntegrityValidation is Enabled', 'EnableCookieEncryption is Enabled') {
+            if (-not $salida.Contains($f)) { throw "Fuse sin aplicar: $f" }
+          }
+      - name: Archivos de actualización y huella SHA-256
+        run: |
+          test -f release/latest-linux.yml || { echo 'Falta release/latest-linux.yml'; exit 1; }
+          cd release && sha256sum *.AppImage > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agente-linux
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/*.AppImage
+            release/latest-linux.yml
+            release/SHA256SUMS-linux.txt
+
+  publicar:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    environment: publicar-agente
+    permissions:
+      contents: write
+    steps:
+      # Sin checkout ni npm: este trabajo solo mueve archivos ya compilados y comprobados.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: publicar
+          merge-multiple: true
+      - name: Lo que se va a publicar
+        run: ls -la publicar && cat publicar/SHA256SUMS-*.txt && cat publicar/latest.yml
+      - name: Publicar en el Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            publicar/*.exe
+            publicar/*.exe.blockmap
+            publicar/latest.yml
+            publicar/*.AppImage
+            publicar/latest-linux.yml
+            publicar/SHA256SUMS-*.txt

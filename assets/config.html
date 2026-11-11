@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:" />
   <title>PrintAgent — Configuración</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -24,7 +25,7 @@
       background: #fff;
     }
     input:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
-    .hint { font-size: 11px; color: #888; margin-top: 3px; }
+    .hint { font-size: 11px; color: #5f5f5f; margin-top: 3px; }
     .footer { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
     button {
       flex: 1;
@@ -36,14 +37,16 @@
       cursor: pointer;
       font-size: 13px;
     }
-    #btnSave   { background: #6366f1; color: #fff; }
-    #btnSave:hover { background: #4f46e5; }
-    #btnTest   { background: #10b981; color: #fff; }
-    #btnTest:hover { background: #059669; }
-    #btnTicket { background: #f59e0b; color: #fff; }
-    #btnTicket:hover { background: #d97706; }
-    #btnRaster, #btnRasterLargo { background: #8b5cf6; color: #fff; }
-    #btnRaster:hover, #btnRasterLargo:hover { background: #7c3aed; }
+    #btnSave   { background: #4f46e5; color: #fff; }
+    #btnSave:hover { background: #4338ca; }
+    #btnTest   { background: #047857; color: #fff; }
+    #btnTest:hover { background: #065f46; }
+    #btnTicket { background: #b45309; color: #fff; }
+    #btnTicket:hover { background: #92400e; }
+    #btnRaster, #btnRasterLargo { background: #6d28d9; color: #fff; }
+    #btnRaster:hover, #btnRasterLargo:hover { background: #5b21b6; }
+    #btnDiag { background: #0369a1; color: #fff; }
+    #btnDiag:hover { background: #075985; }
     #status { margin-top: 12px; padding: 8px 12px; border-radius: 8px; font-size: 12px; display: none; }
     #status.ok    { background: #d1fae5; color: #065f46; display: block; }
     #status.error { background: #fee2e2; color: #991b1b; display: block; }
@@ -101,7 +104,7 @@
     <div class="section-title">Servidor FactuFAST</div>
     <label>URL del servidor</label>
     <input id="serverUrl" type="text" placeholder="https://app.reslez.com" />
-    <p class="hint">URL pública de FactuFAST. Si está en otra PC de la red local, usa su IP. Ej: http://192.168.1.50:3000</p>
+    <p class="hint">Dirección de FactuFAST (siempre https). Las páginas de app.reslez.com y beta.reslez.com se aceptan aunque aquí diga otra.</p>
 
     <div class="section-title" style="margin-top:14px">Probar impresión de ticket</div>
     <p class="hint" style="margin-bottom:6px">Ingresa el ID de un comprobante real para probar la descarga e impresión</p>
@@ -120,7 +123,7 @@
   </div>
 
   <div class="footer">
-    <button id="btnDiag" style="background:#0ea5e9;color:#fff">Diagnóstico</button>
+    <button id="btnDiag">Diagnóstico</button>
     <button id="btnTest">Probar cajón</button>
     <button id="btnTicket">Probar ticket</button>
     <button id="btnRaster" title="Imprime un patrón de puntos corto: responde si esta impresora entiende el ráster del ticket">Probar ráster</button>
@@ -130,7 +133,9 @@
   <div id="status"></div>
 
   <script>
-    const { ipcRenderer } = require('electron');
+    // v1.7.0: la ventana corre aislada y sin Node; solo ve el puente `window.agente`
+    // (src/preload-config.ts).
+    const agente = window.agente;
 
     const ifaceSelect = document.getElementById('printerInterface');
     function updateIfaceGroups() {
@@ -144,7 +149,7 @@
     // Poblar el datalist con las impresoras instaladas en Windows
     async function cargarImpresoras() {
       try {
-        const printers = await ipcRenderer.invoke('list-printers');
+        const printers = await agente.listarImpresoras();
         const dl = document.getElementById('printerList');
         dl.innerHTML = '';
         (printers || []).forEach(name => {
@@ -162,14 +167,15 @@
     cargarImpresoras();
 
     // Cargar config actual
-    ipcRenderer.invoke('get-config').then(cfg => {
+    agente.obtenerConfig().then(cfg => {
+      if (!cfg) return;
       document.getElementById('printerName').value      = cfg.printerName      || '';
       document.getElementById('printerInterface').value = cfg.printerInterface || 'usb';
       document.getElementById('modoTicket').value       = cfg.modoTicket === 'pdf' ? 'pdf' : 'auto';
       document.getElementById('serialPort').value       = cfg.serialPort       || 'COM1';
       document.getElementById('networkHost').value      = cfg.networkHost      || '';
       document.getElementById('networkPort').value      = cfg.networkPort      || 9100;
-      document.getElementById('serverUrl').value        = cfg.serverUrl        || 'http://localhost:3000';
+      document.getElementById('serverUrl').value        = cfg.serverUrl        || 'https://app.reslez.com';
       document.getElementById('notificaciones').checked = cfg.notificaciones !== false;
       updateIfaceGroups();
     });
@@ -185,15 +191,16 @@
         serverUrl:         document.getElementById('serverUrl').value.trim().replace(/\/$/, ''),
         notificaciones:    document.getElementById('notificaciones').checked,
       };
-      await ipcRenderer.invoke('save-config', cfg);
-      showStatus('Configuración guardada.', 'ok');
+      const r = await agente.guardarConfig(cfg);
+      if (r && r.ok) showStatus('Configuración guardada.', 'ok');
+      else showStatus('No se pudo guardar la configuración: revisa los datos.', 'error');
     });
 
     // Diagnóstico: imprime recibo de prueba + abre el cajón
     document.getElementById('btnDiag').addEventListener('click', async () => {
       showStatus('Ejecutando diagnóstico (recibo de prueba + cajón)...', 'ok');
       try {
-        const r = await ipcRenderer.invoke('selftest');
+        const r = await agente.diagnostico();
         if (r.ok) showStatus('Diagnóstico OK: recibo impreso y cajón abierto', 'ok');
         else showStatus('Diagnóstico con errores: ' + (r.errors || []).join(' | '), 'error');
       } catch (e) {
@@ -208,7 +215,7 @@
       const etiqueta = largo ? 'largo (~30 cm)' : 'corto (~5 cm)';
       showStatus('Imprimiendo patron de raster ' + etiqueta + '...', 'ok');
       try {
-        const r = await ipcRenderer.invoke('selftest-raster', largo);
+        const r = await agente.probarRaster(largo);
         if (r.ok) {
           showStatus('Raster enviado (' + r.filas + ' puntos). Mira el papel: si el dibujo salio '
             + 'limpio y se lee "FIN OK", esta impresora aguanta el ticket directo. Si a mitad '
@@ -227,16 +234,11 @@
     document.getElementById('btnTest').addEventListener('click', async () => {
       showStatus('Probando cajón...', 'ok');
       try {
-        const res = await fetch('http://127.0.0.1:7979/print', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ abrirCajon: true, imprimirTicket: false }),
-        });
-        const data = await res.json();
+        const data = await agente.probarCajon();
         if (data.ok) showStatus('¡Cajón abierto correctamente!', 'ok');
         else showStatus('Error: ' + (data.errors || []).join(', '), 'error');
       } catch (e) {
-        showStatus('No se pudo conectar al agente: ' + e.message, 'error');
+        showStatus('Error probando el cajón: ' + e.message, 'error');
       }
     });
 
@@ -249,16 +251,11 @@
       }
       showStatus('Descargando e imprimiendo ticket...', 'ok');
       try {
-        const res = await fetch('http://127.0.0.1:7979/print', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ comprobanteId, imprimirTicket: true, abrirCajon: false }),
-        });
-        const data = await res.json();
+        const data = await agente.probarTicket(comprobanteId);
         if (data.ok) showStatus('Ticket enviado a la impresora correctamente', 'ok');
         else showStatus('Error: ' + (data.errors || []).join(', '), 'error');
       } catch (e) {
-        showStatus('No se pudo conectar al agente: ' + e.message, 'error');
+        showStatus('Error probando el ticket: ' + e.message, 'error');
       }
     });
 

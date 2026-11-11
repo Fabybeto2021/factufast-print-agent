@@ -1,11 +1,13 @@
-import { app, Tray, ipcMain } from 'electron';
+import { app, Tray, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { startServer } from './server';
 import { createTray, updateTrayMenu, notificarError, notificarExito, registrarActividad } from './tray';
 import { loadConfig, saveConfig } from './config';
 import {
-  listarImpresoras, probarImpresion, abrirCajon, diagnostico,
+  listarImpresoras, probarImpresion, abrirCajon, diagnostico, imprimirTicket,
   probarRaster, RASTER_PRUEBA_CORTO, RASTER_PRUEBA_LARGO,
 } from './printer';
+import { esVentanaConfig, validarConfigEntrante } from './config-validacion';
+import { esUuid } from './descarga';
 import { log } from './logger';
 
 // Robustez: nunca morir en silencio por un error no capturado — registrar y seguir
@@ -45,14 +47,26 @@ app.on('ready', () => {
     }
   });
 
-  ipcMain.handle('get-config', () => loadConfig());
-  ipcMain.handle('save-config', (_event, cfg) => {
-    saveConfig(cfg);
+  // v1.7.0: toda llamada IPC tiene que venir de la ventana de configuración del agente.
+  const desdeConfig = (event: IpcMainInvokeEvent): boolean => {
+    const ok = esVentanaConfig(event.senderFrame?.url);
+    if (!ok) log('WARN', `IPC rechazado desde ${event.senderFrame?.url ?? '(desconocido)'}`);
+    return ok;
+  };
+
+  ipcMain.handle('get-config', (event) => (desdeConfig(event) ? loadConfig() : null));
+  ipcMain.handle('save-config', (event, cfg: unknown) => {
+    if (!desdeConfig(event)) return { ok: false };
+    const valido = validarConfigEntrante(cfg);
+    if (!valido) return { ok: false };
+    saveConfig(valido);
     log('INFO', 'Configuración guardada');
+    return { ok: true };
   });
-  ipcMain.handle('list-printers', () => listarImpresoras());
-  ipcMain.handle('diagnostico', () => diagnostico());
-  ipcMain.handle('selftest', async () => {
+  ipcMain.handle('list-printers', (event) => (desdeConfig(event) ? listarImpresoras() : []));
+  ipcMain.handle('diagnostico', (event) => (desdeConfig(event) ? diagnostico() : null));
+  ipcMain.handle('selftest', async (event) => {
+    if (!desdeConfig(event)) return { ok: false, errors: ['no permitido'] };
     const errores: string[] = [];
     try { await probarImpresion(); } catch (e) { errores.push('impresión: ' + (e as Error).message); }
     try { await abrirCajon(); } catch (e) { errores.push('cajón: ' + (e as Error).message); }
@@ -61,13 +75,37 @@ app.on('ready', () => {
 
   // Prueba del camino REAL del ticket fiscal (ráster GS v 0), que el recibo de texto de
   // `selftest` no ejercita — ver la nota de `probarRaster`.
-  ipcMain.handle('selftest-raster', async (_event, largo: boolean) => {
-    const filas = largo ? RASTER_PRUEBA_LARGO : RASTER_PRUEBA_CORTO;
+  ipcMain.handle('selftest-raster', async (event, largo: unknown) => {
+    if (!desdeConfig(event)) return { ok: false, errors: ['no permitido'] };
+    const esLargo = largo === true;
+    const filas = esLargo ? RASTER_PRUEBA_LARGO : RASTER_PRUEBA_CORTO;
     try {
-      await probarRaster(filas, largo ? 'PRUEBA DE RASTER (largo)' : 'PRUEBA DE RASTER (corto)');
+      await probarRaster(filas, esLargo ? 'PRUEBA DE RASTER (largo)' : 'PRUEBA DE RASTER (corto)');
       return { ok: true, filas };
     } catch (e) {
       return { ok: false, filas, errors: ['raster: ' + (e as Error).message] };
+    }
+  });
+
+  // Antes la ventana hacía fetch a http://127.0.0.1:7979 desde file:// (Origin "null"),
+  // que la guardia ahora rechaza: los botones de prueba van por IPC.
+  ipcMain.handle('probar-cajon', async (event) => {
+    if (!desdeConfig(event)) return { ok: false, errors: ['no permitido'] };
+    try {
+      await abrirCajon();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, errors: ['cajón: ' + (e as Error).message] };
+    }
+  });
+  ipcMain.handle('probar-ticket', async (event, comprobanteId: unknown) => {
+    if (!desdeConfig(event)) return { ok: false, errors: ['no permitido'] };
+    if (!esUuid(comprobanteId)) return { ok: false, errors: ['El ID del comprobante no es válido'] };
+    try {
+      await imprimirTicket(comprobanteId);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, errors: ['impresión: ' + (e as Error).message] };
     }
   });
 

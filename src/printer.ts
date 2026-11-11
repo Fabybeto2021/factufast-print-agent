@@ -11,6 +11,7 @@ import {
 } from './escpos';
 import { log } from './logger';
 import { baseDescarga } from './origenes';
+import { esUuid, rutaDescargaSegura, tokenPermitido } from './descarga';
 
 const DOWNLOAD_TIMEOUT_MS = 10_000;
 
@@ -277,10 +278,20 @@ async function imprimirPdf(
   }
 
   // Documento genérico (cobros/VD) → ruta relativa dada; si no, RIDE del comprobante.
-  const pdfUrl = overridePath
-    ? `${servidor}${overridePath}`
-    : `${servidor}/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`;
-  const idSafe = comprobanteId || 'doc';
+  // ⚠️ v1.7.0: la URL tiene que quedar en el MISMO servidor y en /api/ (con `@evil.com`
+  // en la ruta, el token de la caja viajaba a otro host). El id, con forma de UUID.
+  if (!overridePath && !esUuid(comprobanteId)) throw new Error('id de comprobante inválido');
+  const pdfUrl = rutaDescargaSegura(
+    servidor,
+    // `||` y no `??`: la guarda de arriba trata la cadena vacía como «no viene».
+    overridePath || `/api/comprobantes/${comprobanteId}/pdf/${pathSuffix}`,
+  );
+  // El token solo por https (o a esta misma PC): por http en la red lo vería cualquiera.
+  if (authToken && !tokenPermitido(servidor)) {
+    log('WARN', `Servidor ${servidor} sin https: se descarga sin el token de la sesión`);
+    authToken = undefined;
+  }
+  const idSafe = esUuid(comprobanteId) ? comprobanteId : 'doc';
   const tmpPdf = path.join(os.tmpdir(), `${label}_${idSafe}_${Date.now()}.pdf`);
 
   log('INFO', `Descargando ${label} ${comprobanteId} desde ${pdfUrl}`);
@@ -387,7 +398,9 @@ function confirmarCupones(
   ids: string[],
   authToken?: string,
 ): Promise<void> {
-  const url = `${serverUrl}/api/comprobantes/${comprobanteId}/pdf/cupones/confirmar`;
+  if (!esUuid(comprobanteId)) return Promise.reject(new Error('id de comprobante inválido'));
+  const url = rutaDescargaSegura(serverUrl, `/api/comprobantes/${comprobanteId}/pdf/cupones/confirmar`);
+  if (authToken && !tokenPermitido(serverUrl)) authToken = undefined;
   const payload = Buffer.from(JSON.stringify({ ids }), 'utf-8');
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
@@ -473,8 +486,13 @@ export async function verificarImpresora(): Promise<SondaImpresora> {
   }
 
   return new Promise<SondaImpresora>((resolve) => {
-    const safe = cfg.printerName.replace(/'/g, "''");
-    const ps = `$p = Get-CimInstance Win32_Printer -Filter "Name='${safe}'" -ErrorAction SilentlyContinue; ` +
+    // El nombre va en un literal de PowerShell entre comillas SIMPLES (solo `'` se escapa,
+    // doblándolo) y se compara con -eq: entre comillas dobles PowerShell interpretaría
+    // `$()` y el acento grave, y un filtro WQL además exige escapar las `\` de las
+    // impresoras de red (\\servidor\cola).
+    const nombre = cfg.printerName.replace(/'/g, "''");
+    const ps = `$n = '${nombre}'; ` +
+      `$p = Get-CimInstance Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $n } | Select-Object -First 1; ` +
       `if ($null -eq $p) { 'NOTFOUND' } elseif ($p.WorkOffline) { 'OFFLINE' } else { 'ONLINE' }`;
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
       { timeout: 5000 }, (err, stdout) => {

@@ -1,0 +1,24 @@
+# Avisos de dependencias del agente de impresión. Cada versión llega SOLA a todas las
+# cajas, así que una dependencia con un fallo conocido es un fallo en toda la flota.
+# Los PR de Dependabot NO se publican solos: pasan por el tag v* y la aprobación del
+# entorno `publicar-agente` (release.yml).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      menores:
+        update-types: [minor, patch]
+    ignore:
+      # El salto de versión mayor de Electron se hace a propósito (scripts/preparar-1.8.0.ps1),
+      # con prueba en una caja: no en un PR automático.
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

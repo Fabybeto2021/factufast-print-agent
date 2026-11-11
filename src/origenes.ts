@@ -20,22 +20,19 @@
 export const ORIGENES_PLATAFORMA: readonly string[] = [
   'https://app.reslez.com',
   'https://beta.reslez.com',
-  'https://www.serviplast.pro',
-  'https://serviplast.pro',
 ];
 
 /**
- * Dominios retirados → el actual. Desde el 1-nov-2026 `serviplast.pro` solo REDIRIGE a
- * app.reslez.com y más adelante vuelve a su dueño (SPPLAST) para su propia web. Un
- * agente con ese `serverUrl` descargaría —en las peticiones sin `Origin`— de un sitio
- * que ya no es la plataforma, y `https.get` no sigue redirecciones. `loadConfig` lo lee
- * como el dominio actual.
- * ⚠️ Siguen en ORIGENES_PLATAFORMA mientras dure la redirección (marcha atrás posible);
- * quitarlos de ahí ANTES de devolverle el dominio a su dueño: ese día sus páginas no
- * pueden abrir el cajón ni recibir el token de la caja.
+ * Dominios retirados → el actual. Desde el 1-nov-2026 `serviplast.pro` es la web propia
+ * de un cliente (SPPLAST), no la plataforma. Un agente con ese `serverUrl` descargaría
+ * —en las peticiones sin `Origin`— de un sitio ajeno, y `https.get` no sigue
+ * redirecciones. `loadConfig` lo lee como el dominio actual.
+ * ⚠️ v1.7.0: además NUNCA se aceptan como origen, ni aunque estén escritos en
+ * `serverUrl` u `origenesPermitidos`: sus páginas no pueden abrir el cajón de la caja ni
+ * recibir el token de la sesión.
  */
 export const SERVIDOR_ACTUAL = 'https://app.reslez.com';
-const SERVIDORES_RETIRADOS: readonly string[] = ['https://www.serviplast.pro', 'https://serviplast.pro'];
+export const SERVIDORES_RETIRADOS: readonly string[] = ['https://www.serviplast.pro', 'https://serviplast.pro'];
 
 export function migrarServerUrl(url: string): string {
   return SERVIDORES_RETIRADOS.includes(normalizarOrigen(url)) ? SERVIDOR_ACTUAL : url;
@@ -65,21 +62,36 @@ export function esOrigenLocal(origin: string): boolean {
   }
 }
 
+export interface OpcionesOrigen {
+  /**
+   * Aceptar CUALQUIER `http://localhost:*` / `http://127.0.0.1:*` (desarrollo).
+   * Apagado por defecto desde la v1.7.0: cualquier programa de la PC puede abrir un
+   * puerto local y servir una página desde ahí. Por lo mismo, un `serverUrl` local (el
+   * `http://localhost:3000` de una PC de desarrollo) tampoco se acepta sin esta opción:
+   * hasta la 1.6.0 era el valor por defecto, así que un agente nunca configurado le abría
+   * el cajón a cualquier página servida en el puerto 3000.
+   */
+  permitirLocal?: boolean;
+}
+
 /**
- * ¿Se responde con CORS a este origen?
- * Sin `Origin` (curl, la propia app, procesos locales) no hay navegador que proteger.
+ * ¿Se atiende a este origen?
+ * Sin `Origin` (curl, la propia app, procesos locales) no hay navegador que proteger:
+ * eso lo filtra la guardia con `Sec-Fetch-Site`, no esta función.
  */
 export function origenPermitido(
   origin: string | null | undefined,
   serverUrl: string | null | undefined,
   extra: readonly string[] = [],
+  opciones: OpcionesOrigen = {},
 ): boolean {
   if (!origin) return true;
   const o = normalizarOrigen(origin);
   if (!o) return false;
-  if (esOrigenLocal(o)) return true;
+  if (SERVIDORES_RETIRADOS.includes(o)) return false;
+  if (opciones.permitirLocal && esOrigenLocal(o)) return true;
   const configurado = normalizarOrigen(serverUrl);
-  if (configurado && o === configurado) return true;
+  if (configurado && o === configurado && (opciones.permitirLocal || !esOrigenLocal(configurado))) return true;
   if (ORIGENES_PLATAFORMA.includes(o)) return true;
   return extra.map(normalizarOrigen).filter(Boolean).includes(o);
 }
@@ -93,8 +105,10 @@ export function baseDescarga(
   origin: string | null | undefined,
   serverUrl: string | null | undefined,
   extra: readonly string[] = [],
+  opciones: OpcionesOrigen = {},
 ): string {
   const o = normalizarOrigen(origin);
-  if (o && origenPermitido(o, serverUrl, extra)) return o;
-  return normalizarOrigen(serverUrl) || (serverUrl ?? '').trim().replace(/\/+$/, '');
+  if (o && origenPermitido(o, serverUrl, extra, opciones)) return o;
+  return normalizarOrigen(migrarServerUrl(serverUrl ?? ''))
+    || (serverUrl ?? '').trim().replace(/\/+$/, '');
 }

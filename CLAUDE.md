@@ -18,16 +18,28 @@ npm run dist:linux   # Package .AppImage for Linux
 
 **Releases**: bump `package.json` version, push a `v*` tag → GitHub Actions (`.github/workflows/release.yml`) builds Windows NSIS + Linux AppImage from source and publishes to GitHub Releases. `electron-updater` on the client checks 10 s after startup. **Smoke-test drawer + print on a clean Windows VM before tagging.**
 
+**Supply chain (since 1.7.0)** — every release reaches the whole fleet on its own, so the workflow is the most sensitive door of the system:
+- **Two stages.** `build-windows` / `build-linux` run with a READ-ONLY token: `npm ci`, Sumatra by hash, tests, `electron-builder --publish never`, fuses checked, SHA-256 sums, `upload-artifact`. All third-party code (npm install scripts, native rebuilds) runs here, where it cannot publish. Only `publicar` has `contents: write`, runs in the environment **`publicar-agente`** and does not install anything: it downloads the artifacts and attaches them to the release. With *Required reviewers* = the owner (Settings → Environments; configure it once, otherwise it blocks nothing) it waits for approval. Not draft releases: electron-updater doesn't see drafts and one was already forgotten (1.3.0).
+- ⚠️ **The installer names are fixed in `package.json`** (`nsis.artifactName` = `FactuFAST-PrintAgent-Setup-${version}.${ext}`, `linux.artifactName` = `FactuFAST-PrintAgent-${version}.${ext}`): `latest.yml` points to the dashed name, and electron-builder used to rename on upload. Uploaded as-is, GitHub would turn the spaces into dots and no till would find the update.
+- The tag must equal `v` + `package.json` version (checked in both build jobs). `npm ci` (exact lockfile), actions pinned by commit SHA (verified against upstream with `git ls-remote` on 11-nov-2026), no npm cache, `SHA256SUMS-*.txt` attached to the release. The fuses are read with the `@electron/fuses` that electron-builder brings (`npx --no-install electron-fuses`), nothing downloaded at build time.
+- ⚠️ **What the workflow cannot stop** — close it in GitHub settings: a tag pushed on an OLD commit runs that commit's `release.yml` (no approval, write token for everything), and a token with write access can create a Release through the API without any workflow. Needed: tag ruleset on `*` (create/move/delete owner only — electron-updater also accepts tags without `v`), **Immutable releases**, the environment limited to `v*` tags, 2FA. Full defense = code signing + `publisherName` (out of scope, cost).
+- `scripts/ensure-sumatra.js` pins SumatraPDF 3.5.2 by **SHA-256** (`290e4aa7…`, checked 10-nov-2026 with two independent downloads, Authenticode valid). Postinstall is best-effort; CI runs it with `--estricto` (exit 1 on mismatch). Changing Sumatra = change URL and hash together after checking the new signature.
+- **1.8.0** = Electron 44 + fuses (no RunAsNode, no `--inspect`, no `NODE_OPTIONS`, asar-only with integrity). Apply with `scripts/preparar-1.8.0.ps1` **after** 1.7.0 is published (validated on a copy: 42 tests, electron-builder 26 packaging, fuses read back; `@serialport/bindings-cpp` is N-API, no rebuild). The CI checks the fuses as soon as `package.json` declares them. Still to test on a real till: ticket, drawer, «Probar impresora», and auto-update 1.7.0 → 1.8.0.
+- `.github/dependabot.yml`: weekly npm (minor/patch grouped; Electron majors ignored — done on purpose) and monthly actions.
+
 ## Architecture
 
-Single-process Electron app with no renderer (system tray only). The tray UI opens `assets/config.html` via `BrowserWindow` with `nodeIntegration: true`.
+Single-process Electron app with no renderer (system tray only). The tray UI opens `assets/config.html` via `BrowserWindow` — **isolated since v1.7.0** (`contextIsolation`, `sandbox`, no Node) with the `src/preload-config.ts` bridge (`window.agente`).
 
 ### Source files (`src/`)
 
 | File | Responsibility |
 |------|----------------|
-| `main.ts` | Entry point. Single-instance lock, IPC handlers (`get/save-config`, `list-printers`, `diagnostico`, `selftest`), starts HTTP server, configures `electron-updater`. |
-| `server.ts` | Express on `127.0.0.1:7979`. Endpoints: `GET /status` (real probe), `POST /print`, `POST /selftest`. CORS + Private Network Access preflight. |
+| `main.ts` | Entry point. Single-instance lock, IPC handlers (`get/save-config`, `list-printers`, `diagnostico`, `selftest`, `selftest-raster`, `probar-cajon`, `probar-ticket`) — **every handler checks the sender is `assets/config.html`** and `save-config` validates the payload (`config-validacion.ts`). Starts HTTP server, configures `electron-updater`. |
+| `server.ts` | Express on `127.0.0.1:7979`. Endpoints: `GET /status` (real probe), `POST /print`, `POST /selftest`. **Guard first** (`guardia.ts`), then CORS + Private Network Access preflight, then `express.json()`. |
+| `guardia.ts` | **Pure** (v1.7.0). `evaluarPeticion()` — the only thing between a web page and the cash drawer. See "Request guard". Tested in `test/guardia.test.js`. |
+| `descarga.ts` | **Pure** (v1.7.0). `rutaDescargaSegura()` (same origin, `/api/` only), `tokenPermitido()` (https or this PC), `esUuid()`. Tested in `test/descarga.test.js`. |
+| `config-validacion.ts` / `preload-config.ts` | v1.7.0 config window: payload validation + sender check (pure) and the isolated bridge. |
 | `printer.ts` | Drawer + printing. `enviarRaw()` picks transport: **USB → winspool (Windows-only, no native module, NO fallback)**, network → TCP socket (`net`), serial → `node-thermal-printer`. `abrirCajon()`, `imprimirTicket()`, `imprimirCupones()` (two-phase ACK), `imprimirEscposInline()`, `probarImpresion()`, `verificarImpresora()` (WMI probe), `verificarServidor()`, `diagnostico()`, `listarImpresoras()`. |
 | `escpos.ts` | **Pure, electron-free** ESC/POS helpers (`DRAWER_KICK`, `construirTicketPrueba`, `parseCuponIds`, `buildWinspoolScript`). Imported by `printer.ts`; unit-tested in `test/escpos.test.js`. |
 | `config.ts` | `AgentConfig` + `loadConfig()`/`saveConfig()` → `userData/config.json`, merged with `DEFAULT_CONFIG`. `AGENT_PORT = 7979`. |
@@ -121,6 +133,38 @@ Rules now:
 - **TCP uses `socket.end(data)` and waits for close**, not `write()` + `destroy()` after 150 ms: `destroy()` discards whatever is still buffered, truncating the tail of a long ticket to a slow network printer. If the printer never closes its side (common), a 2 s grace timer resolves anyway — the bytes were already flushed and FIN sent.
 - The web side gates on **agent ≥ 1.4.0** (`MIN_VER_ESCPOS_INLINE` in `src/lib/pos/printAgent.ts`), not ≥1.3.0. Sending ESC/POS to a 1.3.x agent yields a 413 with no `errors` array, which drives FactuFAST's `debeFallback` into its conservative branch → a browser print dialog on every sale.
 
+### Request guard (v1.7.0) — why CORS was not enough
+
+Up to v1.6.0 the server only **set CORS headers** and always called `next()`. CORS decides whether the
+*browser lets a page read the response*; it never stops the server from *executing* the request. A
+`POST /selftest` with no body is a "simple" request (no preflight), so **any page open on the till PC
+— an ad, an email, a link — could print and kick the cash drawer**.
+
+`evaluarPeticion()` runs **before `express.json()`**, for every method:
+
+1. `Host` must be `127.0.0.1:7979` or `localhost:7979` → closes DNS rebinding (`evil.com` re-resolved to 127.0.0.1 arrives with `Host: evil.com:7979`).
+2. If `Origin` is present it must be allowed (`origenPermitido`) → 403 for every method. `Origin: null` (a `file://` page) is rejected.
+3. `POST` must be `application/json` → 415. An HTML form cannot send JSON, and a JSON fetch forces a preflight that a foreign origin cannot pass.
+4. No `Origin` but `Sec-Fetch-Site: cross-site|same-site` → 403 (`<img>`, links). curl and local processes (FactuFAST Desktop's main process) send neither header and keep working.
+
+CORS is only emitted for an allowed origin, never `*`, with `Vary: Origin` and `Access-Control-Max-Age: 600`.
+
+⚠️ **Ship order: web first.** The POS's "Probar impresora" used to `POST /selftest` with no
+`Content-Type`; this agent answers that with 415. FactuFAST's `pos/configuracion/page.tsx` sends JSON
+since 10-nov-2026 — deploy that before releasing 1.7.0.
+
+⚠️ The config window can no longer `fetch('http://127.0.0.1:7979/print')` (its `Origin` is `null`):
+"Probar cajón" and "Probar ticket" go through IPC (`probar-cajon`, `probar-ticket`).
+
+### Download path and token (v1.7.0)
+
+Until v1.6.0 the PDF URL was `${servidor}${ticketPdfPath}` with no checks: `@evil.com/x` became
+`https://app.reslez.com@evil.com/x` — host `evil.com` — and the agent sent it the cashier's token in
+`Authorization`. Now `rutaDescargaSegura()` requires a `/api/` path with no `//`, `\`, `@`, spaces or
+control chars and the **same origin** as the server; `comprobanteId` must be a UUID; and the token is
+only sent over https or to this PC (`tokenPermitido`) — over http on the LAN it is dropped (the
+download then fails visibly with 401).
+
 ### Private Network Access (PNA)
 
 Browsers are tightening calls from HTTPS pages to `http://localhost`. `server.ts` answers the PNA preflight with `Access-Control-Allow-Private-Network: true`, so a Chrome/Edge update won't silently block the agent.
@@ -130,20 +174,20 @@ Browsers are tightening calls from HTTPS pages to `http://localhost`. `server.ts
 The platform moved from `www.serviplast.pro` to `app.reslez.com` (31-oct-2026) and both domains serve the same app for weeks. Up to v1.5.0 the agent accepted **only the exact origin of its `serverUrl`** (CORS) and always downloaded PDFs **from `serverUrl`** — so a till opened on the new domain with the agent still pointing at the old one could not print (browser dialog on every sale), and every till would break the day the old domain went away.
 
 `src/origenes.ts` (pure, tested in `test/origenes.test.js`):
-- `origenPermitido(origin, serverUrl, extra)` — localhost (**exact host**, not the old `startsWith('http://localhost')`, which also let `http://localhost.evil.com` through), the configured `serverUrl`, the closed list `ORIGENES_PLATAFORMA`, and optional `origenesPermitidos` from `config.json`.
+- `origenPermitido(origin, serverUrl, extra, { permitirLocal })` — the configured `serverUrl`, the closed list `ORIGENES_PLATAFORMA` (`app.reslez.com`, `beta.reslez.com`), and optional `origenesPermitidos` from `config.json`. **Any** `http://localhost:*` (exact host) only with `permitirOrigenLocal: true` in `config.json` (v1.7.0 — any program on the PC can open a local port). `SERVIDORES_RETIRADOS` are **never** accepted, not even if written in `serverUrl` or `origenesPermitidos`.
 - `baseDescarga(origin, serverUrl)` — PDFs (ticket, cupones and the cupones ACK) are fetched from **the same origin that asked for the print**; without an `Origin` header, from `serverUrl`. The agent follows the till, not the other way round.
 - ⚠️ The list is **closed on purpose**: the agent opens the drawer and receives the cashier's session token. Accepting any https origin would let any page open on that PC kick the drawer or receive the token.
 - Safe while the fleet is mixed: for a till whose page origin equals its `serverUrl` (every till before the move) behaviour is byte-for-byte the same.
-- `migrarServerUrl(url)` — since 1-nov-2026 `serviplast.pro` only **redirects** to `app.reslez.com` (and later goes back to its owner, SPPLAST). `https.get` does not follow redirects, so `loadConfig()` reads a `serverUrl` on the retired domain as `SERVIDOR_ACTUAL`; the file is rewritten the next time the config is saved. ⚠️ The retired domains stay in `ORIGENES_PLATAFORMA` while the redirect lasts (rollback); **remove them before the domain is handed back**, or the owner's pages could open the drawer and receive the till token.
+- `migrarServerUrl(url)` — since 1-nov-2026 `serviplast.pro` is a client's own website (SPPLAST), not the platform. `https.get` does not follow redirects, so `loadConfig()` reads a `serverUrl` on the retired domain as `SERVIDOR_ACTUAL`; the file is rewritten the next time the config is saved. **v1.7.0 removed the retired domains from `ORIGENES_PLATAFORMA`** — the owner's pages must not open the drawer or receive the till token.
 
 ### Config storage
 
-`%APPDATA%\FactuFAST PrintAgent\config.json`. Fields: `printerName`, `printerInterface` (`usb|serial|network`), `serialPort`, `networkHost`, `networkPort`, `serverUrl`, `notificaciones`, optional `origenesPermitidos` (extra https origins, v1.6.0). The config window populates a printer **dropdown** (datalist) from `list-printers` (PowerShell `Get-Printer`) and has a **Diagnóstico** button. (The dead `agentPort` field was removed.)
+`%APPDATA%\FactuFAST PrintAgent\config.json`. Fields: `printerName`, `printerInterface` (`usb|serial|network`), `serialPort`, `networkHost`, `networkPort`, `serverUrl`, `notificaciones`, optional `origenesPermitidos` (extra https origins, v1.6.0), optional `permitirOrigenLocal` (any localhost, dev only, v1.7.0). The last two can only be set by editing the file: the config window drops them. The config window populates a printer **dropdown** (datalist) from `list-printers` (PowerShell `Get-Printer`) and has a **Diagnóstico** button. (The dead `agentPort` field was removed.)
 
 ### Key constraints
 
-- **Tests**: `test/escpos.test.js` (node:test) covers the pure ESC/POS helpers. Keep pure logic in `escpos.ts` so it stays testable without Electron.
-- `nodeIntegration: true` in the config window is intentional (`ipcRenderer` access).
+- **Tests**: `test/*.test.js` (node:test) — ESC/POS helpers, origins, request guard, download path and config validation. Keep pure logic in electron-free modules so it stays testable.
+- The config window is isolated (v1.7.0). **Never** go back to `nodeIntegration: true`; add a method to `preload-config.ts` and a sender-checked IPC handler instead.
 - `electron-updater` and `node-thermal-printer` are `require()`'d lazily inside functions.
 - **`SumatraPDF.exe` path**: `process.resourcesPath` when packaged; `path.join(__dirname, '..', 'vendor')` in dev.
 - **Health check** uses the real WMI `Win32_Printer` probe (`WorkOffline`/existence), not just "is a name configured".

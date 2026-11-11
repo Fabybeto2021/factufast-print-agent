@@ -141,11 +141,19 @@ function openConfigWindow(): void {
     height: 580,
     resizable: false,
     title: 'FactuFAST PrintAgent — Configuración',
+    // v1.7.0: aislada y sin Node. Antes (`nodeIntegration: true`) cualquier cosa que
+    // llegara a ejecutarse en esta ventana tenía acceso total a la PC.
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload-config.js'),
     },
   });
+  configWindow.setMenuBarVisibility(false);
+  // La ventana no navega a ningún lado ni abre otras.
+  configWindow.webContents.on('will-navigate', (e) => e.preventDefault());
+  configWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   const htmlPath = path.join(__dirname, '..', 'assets', 'config.html');
   configWindow.loadFile(htmlPath);
   configWindow.on('closed', () => { configWindow = null; });
